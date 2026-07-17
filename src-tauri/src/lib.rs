@@ -1,0 +1,551 @@
+mod api_gateway;
+mod app_state;
+mod auto_ping;
+mod detection;
+mod handoff;
+mod models;
+mod pricing;
+mod prime;
+mod quota;
+mod seamless;
+mod store;
+mod tools;
+mod tray;
+mod usage;
+mod wake;
+
+use app_state::ManagedState;
+use models::{
+    AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, ConfirmExtendInput,
+    CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
+    DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport,
+    RenameAccountInput, SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetAutoExtendInput,
+    SetAutoPrimeAllInput, SetAutoPrimeInput, SetLauncherInput, SetToolSetupInput,
+    StartApiGatewayInput, SwitchAccountInput, ToolId, UsageReport,
+};
+use tauri::{Emitter, Manager, State};
+
+#[tauri::command]
+fn load_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    // App just opened: update accounts that finished logging in while it was closed.
+    let _ = state.recheck_pending_logins();
+    state.snapshot().map_err(display_error)
+}
+
+#[tauri::command]
+async fn refresh_tool(app: tauri::AppHandle, tool_id: ToolId) -> Result<AppSnapshot, String> {
+    let app2 = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        app2.state::<ManagedState>()
+            .refresh_tool(tool_id, Some(&app2))
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    tray::rebuild(&app);
+    result
+}
+
+#[tauri::command]
+async fn refresh_account(
+    app: tauri::AppHandle,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<AppSnapshot, String> {
+    let app2 = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        app2.state::<ManagedState>()
+            .refresh_single_account(&tool_id, &account_id, Some(&app2))
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    tray::rebuild(&app);
+    result
+}
+
+#[tauri::command]
+fn add_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: AddAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state.add_account(&app, input).map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn add_api_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: AddApiAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state.add_api_account(input).map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+/// List the gateway's models (`{base_url}/models`) so the Add dialog can offer a default model +
+/// mapping targets. Stateless — just proxies the HTTP call.
+#[tauri::command]
+fn fetch_gateway_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    tools::fetch_gateway_models(&base_url, &api_key).map_err(display_error)
+}
+
+#[tauri::command]
+fn rename_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: RenameAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state.rename_account(input).map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn switch_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: SwitchAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state.switch_account(input).map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_launcher(
+    state: State<'_, ManagedState>,
+    input: SetLauncherInput,
+) -> Result<AppSnapshot, String> {
+    state.set_launcher(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn delete_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state
+        .delete_account(tool_id, account_id)
+        .map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn accept_disclaimer(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    state.accept_disclaimer().map_err(display_error)
+}
+
+#[tauri::command]
+fn antigravity_new_login(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    state.antigravity_new_login().map_err(display_error)
+}
+
+#[tauri::command]
+fn set_auto_switch(
+    state: State<'_, ManagedState>,
+    enabled: bool,
+    threshold: f64,
+) -> Result<AppSnapshot, String> {
+    state
+        .set_auto_switch(enabled, threshold)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn set_auto_switch_setting(
+    state: State<'_, ManagedState>,
+    tool_id: ToolId,
+    enabled: bool,
+    threshold: f64,
+) -> Result<AppSnapshot, String> {
+    state
+        .set_auto_switch_setting(tool_id, enabled, threshold)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn set_launch_with_windows(app: tauri::AppHandle, enabled: bool) -> Result<AppSnapshot, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|e| e.to_string())?;
+    app.state::<ManagedState>()
+        .set_launch_with_windows(enabled)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn set_auto_prime(
+    state: State<'_, ManagedState>,
+    input: SetAutoPrimeInput,
+) -> Result<AppSnapshot, String> {
+    state
+        .set_auto_prime(input.tool_id, input.account_id, input.enabled, input.time)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn set_auto_prime_all(
+    state: State<'_, ManagedState>,
+    input: SetAutoPrimeAllInput,
+) -> Result<AppSnapshot, String> {
+    state
+        .set_auto_prime_all(input.time, input.enabled)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn confirm_extend(
+    state: State<'_, ManagedState>,
+    input: ConfirmExtendInput,
+) -> Result<AppSnapshot, String> {
+    state
+        .confirm_extend(input.tool_id, input.account_id, input.accept)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn set_auto_extend(
+    state: State<'_, ManagedState>,
+    input: SetAutoExtendInput,
+) -> Result<AppSnapshot, String> {
+    state
+        .set_auto_extend(input.tool_id, input.account_id, input.enabled)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn get_auto_prime_log(state: State<'_, ManagedState>) -> String {
+    state.auto_prime_log()
+}
+
+#[tauri::command]
+fn get_auto_prime_stats(state: State<'_, ManagedState>) -> Vec<models::AutoPrimeDayStat> {
+    state.auto_prime_stats(14)
+}
+
+/// Whether the pmset wake helper LaunchDaemon is installed (so the Mac can wake itself to prime).
+#[tauri::command]
+fn wake_helper_status() -> bool {
+    wake::helper_installed()
+}
+
+/// Install the root LaunchDaemon (one admin prompt) + write the first wake request.
+#[tauri::command]
+fn install_wake_helper(state: State<'_, ManagedState>) -> Result<bool, String> {
+    wake::install_helper(&state.store).map_err(|e| e.to_string())?;
+    state.update_wake_schedule();
+    Ok(true)
+}
+
+/// Remove the root LaunchDaemon (one admin prompt).
+#[tauri::command]
+fn uninstall_wake_helper() -> Result<bool, String> {
+    wake::uninstall_helper().map_err(|e| e.to_string())?;
+    Ok(false)
+}
+
+#[tauri::command]
+fn open_auto_prime_log(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = app.state::<ManagedState>().store.auto_prime_log_path();
+    // Ensure the file exists so the OS has something to open.
+    if !path.exists() {
+        let _ = std::fs::write(&path, "");
+    }
+    app.opener()
+        .open_path(path.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_auto_prime_log_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = app.state::<ManagedState>().store.auto_prime_log_path();
+    if !path.exists() {
+        let _ = std::fs::write(&path, "");
+    }
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn detect_tool_setup(state: State<'_, ManagedState>, tool_id: ToolId) -> DetectionReport {
+    state.detect_tool_setup(tool_id)
+}
+
+#[tauri::command]
+fn validate_tool_setup(
+    state: State<'_, ManagedState>,
+    input: SetToolSetupInput,
+) -> DetectionReport {
+    state.validate_tool_setup(input)
+}
+
+#[tauri::command]
+fn set_tool_setup(
+    state: State<'_, ManagedState>,
+    input: SetToolSetupInput,
+) -> Result<AppSnapshot, String> {
+    state.set_tool_setup(input).map_err(display_error)
+}
+
+/// Token usage + cost report for the Usage tab (Claude + Codex, aggregated per tool).
+/// `range_days` limits the totals to the last N local days (0 = all time).
+#[tauri::command]
+fn get_usage(state: State<'_, ManagedState>, range_days: u32) -> UsageReport {
+    state.usage_report(range_days)
+}
+
+#[tauri::command]
+fn get_api_usage(state: State<'_, ManagedState>) -> ApiUsageReport {
+    state.api_usage_report()
+}
+
+#[tauri::command]
+async fn start_api_gateway(
+    app: tauri::AppHandle,
+    input: StartApiGatewayInput,
+) -> Result<AppSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .start_api_gateway(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn stop_api_gateway(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    state.stop_api_gateway().map_err(display_error)
+}
+
+#[tauri::command]
+fn create_api_gateway_key(
+    state: State<'_, ManagedState>,
+    input: CreateApiGatewayKeyInput,
+) -> Result<CreateApiGatewayKeyResult, String> {
+    state.create_api_gateway_key(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn delete_api_gateway_key(
+    state: State<'_, ManagedState>,
+    input: DeleteApiGatewayKeyInput,
+) -> Result<AppSnapshot, String> {
+    state.delete_api_gateway_key(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn reveal_api_gateway_key(
+    state: State<'_, ManagedState>,
+    key_id: String,
+) -> Result<String, String> {
+    state.reveal_api_gateway_key(key_id).map_err(display_error)
+}
+
+#[tauri::command]
+fn save_api_gateway_combo(
+    state: State<'_, ManagedState>,
+    input: SaveApiGatewayComboInput,
+) -> Result<AppSnapshot, String> {
+    state.save_api_gateway_combo(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn delete_api_gateway_combo(
+    state: State<'_, ManagedState>,
+    input: DeleteApiGatewayComboInput,
+) -> Result<AppSnapshot, String> {
+    state.delete_api_gateway_combo(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn set_api_gateway_account(
+    state: State<'_, ManagedState>,
+    input: SetApiGatewayAccountInput,
+) -> Result<AppSnapshot, String> {
+    state.set_api_gateway_account(input).map_err(display_error)
+}
+
+#[tauri::command]
+async fn refresh_api_gateway_models(app: tauri::AppHandle) -> Result<AppSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .refresh_api_gateway_models()
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn create_virtual_api_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: CreateVirtualApiAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state
+        .create_virtual_api_account(input)
+        .map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+pub fn run() {
+    let state = ManagedState::new().expect("failed to initialize app state");
+    tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            load_snapshot,
+            refresh_tool,
+            refresh_account,
+            add_account,
+            add_api_account,
+            fetch_gateway_models,
+            rename_account,
+            switch_account,
+            set_launcher,
+            delete_account,
+            accept_disclaimer,
+            antigravity_new_login,
+            set_auto_switch,
+            set_auto_switch_setting,
+            set_launch_with_windows,
+            detect_tool_setup,
+            validate_tool_setup,
+            set_tool_setup,
+            get_usage,
+            get_api_usage,
+            start_api_gateway,
+            stop_api_gateway,
+            create_api_gateway_key,
+            delete_api_gateway_key,
+            reveal_api_gateway_key,
+            save_api_gateway_combo,
+            delete_api_gateway_combo,
+            set_api_gateway_account,
+            refresh_api_gateway_models,
+            create_virtual_api_account
+        ])
+        .setup(|app| {
+            // Menu-bar (tray) icon for quick account switching without opening the window.
+            tray::create(app.handle())?;
+            // On Windows the WebView process can start while the main window remains hidden.
+            // Explicitly restore it so the first Desktop-shortcut click always opens the UI.
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                // Set the window icon so the taskbar shows the custom logo
+                // (bundle.icon only applies to the built .exe, not dev mode).
+                if let Ok(icon) =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                {
+                    let _ = window.set_icon(icon);
+                }
+                let startup_hidden = std::env::args().any(|arg| arg == "--hidden");
+                if startup_hidden {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+
+            // Background poller: periodically refresh quota + auto-switch if enabled.
+            // Refresh every 5 minutes (Claude's quota endpoint is rate-limited hard;
+            // the 5h/weekly quota changes slowly, so no need to poll more often).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+                let state = handle.state::<ManagedState>();
+                for tool_id in [ToolId::Claude, ToolId::Codex] {
+                    let _ = state.refresh_tool(tool_id, Some(&handle));
+                }
+                // Keep the token-usage cache warm and nudge any open Usage tab to refetch
+                // (with whatever range the user has selected).
+                let _ = state.usage_report(0);
+                let _ = handle.emit("usage-changed", ());
+                // Refresh the tray menu's quota %/checkmarks with the new snapshot.
+                tray::rebuild(&handle);
+            });
+
+            // Watch active Codex rollouts for quota errors so seamless auto-switch can react
+            // without generating synthetic traffic.
+            let codex_watch_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let state = codex_watch_handle.state::<ManagedState>();
+                let _ = state.check_codex_quota_error_and_auto_switch(Some(&codex_watch_handle));
+            });
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Close (✕) hides the main window to the tray instead of quitting — the poller and
+            // tray stay alive so quick-switch keeps working. Quit is via the tray menu.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let state = app.state::<ManagedState>();
+                let _ = state.stop_api_gateway();
+            }
+            #[cfg(target_os = "macos")]
+            // Clicking the Dock icon while the window is hidden (closed to tray) reopens it.
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
+}
+
+fn display_error(error: anyhow::Error) -> String {
+    let text = error.to_string();
+    if text.contains("Failed to switch account") {
+        "Failed to switch account — kept the previous account".to_string()
+    } else if text.contains("Login not completed") {
+        "Login not completed, account not added".to_string()
+    } else if text.contains("No login") {
+        "No login found for this tool".to_string()
+    } else {
+        text
+    }
+}

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash 'D:\\Code\\Code\\ai-switcher\\.codex\\hooks\\verify-stop.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}
