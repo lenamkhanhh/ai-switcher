@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   CircleHelp,
+  Code2,
   Copy,
   Info,
   KeyRound,
@@ -600,6 +601,13 @@ export function App() {
 
       <div className="workspace">
         <aside className="sidebar">
+          <div className="sidebarBrand">
+            <span className="sidebarBrandMark" aria-hidden>
+              <img src={logoUrl} alt="" />
+            </span>
+            <strong>AI Account Switcher</strong>
+          </div>
+
           <div className="sidebarNav">
             {snapshot.tools.map((tool) => (
               <button
@@ -610,58 +618,69 @@ export function App() {
                   setSelectedTool(tool.id);
                 }}
               >
-                <span>{tool.name}</span>
-                <small>{tool.installed ? activeLabel(tool) : "Tool not installed"}</small>
+                <span className="sidebarNavIcon" aria-hidden>
+                  {tool.id === "codex" ? <Code2 /> : <Boxes />}
+                </span>
+                <span className="sidebarNavCopy">
+                  <strong>{tool.name}</strong>
+                  <small>{tool.installed ? "Accounts" : "Tool not installed"}</small>
+                </span>
               </button>
             ))}
-            <div className="sideDivider" />
             {!isWindowsCodexOnly && (
               <button
                 className={`toolTab ${view === "api" ? "selected" : ""}`}
                 onClick={() => setView("api")}
               >
-                <span className="usageTabLabel">
+                <span className="sidebarNavIcon" aria-hidden>
                   <Server />
-                  API
                 </span>
-                <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
+                <span className="sidebarNavCopy">
+                  <strong>API</strong>
+                  <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
+                </span>
               </button>
             )}
             <button
               className={`toolTab ${view === "usage" ? "selected" : ""}`}
               onClick={() => setView("usage")}
             >
-              <span className="usageTabLabel">
+              <span className="sidebarNavIcon" aria-hidden>
                 <BarChart3 />
-                Usage
               </span>
-              <small>Token &amp; cost</small>
+              <span className="sidebarNavCopy">
+                <strong>Usage</strong>
+                <small>Token &amp; cost</small>
+              </span>
             </button>
             <button
               className={`toolTab ${view === "settings" ? "selected" : ""}`}
               onClick={() => setView("settings")}
             >
-              <span className="usageTabLabel">
+              <span className="sidebarNavIcon" aria-hidden>
                 <Settings />
-                Settings
               </span>
-              <small>CLI paths</small>
+              <span className="sidebarNavCopy">
+                <strong>Settings</strong>
+                <small>CLI paths</small>
+              </span>
             </button>
           </div>
 
+          <div className="sidebarEtching" aria-hidden>
+            <img src={logoUrl} alt="" />
+          </div>
+
           <div className="sidebarFoot">
-            <img className="footLogo" src={logoUrl} alt="" />
-            <div className="footMeta">
-              <strong>AI Account Switcher</strong>
-              <small>{version ? `v${version}` : ""}</small>
-              <button
-                className="footBy"
-                onClick={() => void openUrl("https://hoangphan.blog/").catch(() => {})}
-                title="https://hoangphan.blog/"
-              >
-                Powered by Hoàng Phan
-              </button>
-            </div>
+            <button
+              className="sidebarCredit"
+              onClick={() => void openUrl("https://hoangphan.blog/").catch(() => {})}
+              title="https://hoangphan.blog/"
+            >
+              {version && <span>v{version}</span>}
+              {version && <i aria-hidden>·</i>}
+              <span>Hoàng Phan</span>
+            </button>
           </div>
         </aside>
 
@@ -2680,13 +2699,6 @@ function CandidateList({
       )}
     </div>
   );
-}
-
-function activeLabel(tool: ToolStatus) {
-  const account = tool.accounts.find((item) => item.id === tool.activeAccountId);
-  const name = !account || account.isDefault ? "Machine default" : account.name;
-  // Antigravity is a GUI app with no "bare command", so use different wording.
-  return tool.id === "antigravity" ? `Using: ${name}` : `Bare command = ${name}`;
 }
 
 function stateLabel(state: Account["state"]) {
