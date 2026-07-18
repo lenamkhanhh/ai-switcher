@@ -8,6 +8,14 @@ pub fn should_checkpoint(percent_used: Option<f64>, session_idle: bool) -> bool 
     session_idle && percent_used.is_some_and(|value| value >= DEFAULT_HANDOFF_THRESHOLD)
 }
 
+pub fn should_start_handoff(
+    percent_used: Option<f64>,
+    explicit_quota_error: bool,
+    threshold: f64,
+) -> bool {
+    explicit_quota_error || percent_used.is_some_and(|value| value >= threshold)
+}
+
 pub fn resume_args<'a>(session_id: &'a str, prompt: &'a str) -> [&'a str; 3] {
     ["resume", session_id, prompt]
 }
@@ -22,10 +30,10 @@ pub fn select_candidate<'a>(accounts: &'a [Account], current_id: &str) -> Option
                 && account.state != AccountState::NeedsLogin
                 && account.quota.as_ref().is_some_and(|quota| {
                     quota.error.is_none()
-                        && quota
-                            .five_hour
-                            .percent_used
-                            .is_some_and(|v| v < CANDIDATE_LIMIT)
+                        // OpenAI may temporarily omit the 5-hour window. In that state the
+                        // weekly window plus a healthy auth response is the only trustworthy
+                        // signal, so keep the account eligible and rank unknown 5h last.
+                        && quota.five_hour.percent_used.is_none_or(|v| v < CANDIDATE_LIMIT)
                         && quota.weekly.percent_used.is_some_and(|v| v < 100.0)
                 })
         })
@@ -35,8 +43,8 @@ pub fn select_candidate<'a>(accounts: &'a [Account], current_id: &str) -> Option
         let rq = right.quota.as_ref().expect("filtered");
         lq.five_hour
             .percent_used
-            .unwrap_or(100.0)
-            .total_cmp(&rq.five_hour.percent_used.unwrap_or(100.0))
+            .unwrap_or(CANDIDATE_LIMIT)
+            .total_cmp(&rq.five_hour.percent_used.unwrap_or(CANDIDATE_LIMIT))
             .then_with(|| {
                 lq.weekly
                     .percent_used
@@ -88,9 +96,17 @@ pub fn spawn_exact_resume(
         .args(resume_args(session_id, prompt))
         .env("CODEX_HOME", code_home)
         .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        // Keep the TUI attached to a real console on Windows. This is required for the
+        // follow-up `/app` command; a detached process can only prove that it started.
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
+    }
+    #[cfg(not(windows))]
     crate::tools::hide_command_window(&mut command);
     let mut child = command
         .spawn()
@@ -110,6 +126,7 @@ pub fn spawn_exact_resume(
             Err(error) => return Err(format!("resume health check failed: {error}")),
         }
     }
+    crate::tools::open_codex_session_in_app_after_resume(pid);
     Ok(pid)
 }
 
@@ -141,11 +158,59 @@ mod tests {
     }
 
     #[test]
+    fn unknown_window_only_handoffs_after_an_explicit_quota_error() {
+        assert!(!should_start_handoff(None, false, 92.0));
+        assert!(should_start_handoff(None, true, 92.0));
+        assert!(should_start_handoff(Some(92.0), false, 92.0));
+    }
+
+    #[test]
     fn resume_is_exact_and_never_uses_last() {
         assert_eq!(
             resume_args("session-uuid", "checkpoint"),
             ["resume", "session-uuid", "checkpoint"]
         );
         assert!(!resume_args("session-uuid", "checkpoint").contains(&"--last"));
+    }
+
+    #[test]
+    fn unknown_five_hour_quota_can_be_a_candidate_when_weekly_is_known() {
+        let account = Account {
+            id: "candidate".into(),
+            name: "candidate".into(),
+            tool_id: ToolId::Codex,
+            state: AccountState::Idle,
+            fingerprint: "candidate".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_used_at: None,
+            launcher_command: None,
+            launcher_paths: None,
+            is_default: false,
+            avatar_url: None,
+            account_email: None,
+            api_provider: None,
+            quota_status: None,
+            quota: Some(crate::models::QuotaInfo {
+                five_hour: crate::models::QuotaWindow {
+                    label: "5-hour".into(),
+                    percent_used: None,
+                    reset_at: None,
+                },
+                weekly: crate::models::QuotaWindow {
+                    label: "Weekly".into(),
+                    percent_used: Some(40.0),
+                    reset_at: None,
+                },
+                models: None,
+                plan: None,
+                updated_at: None,
+                error: None,
+            }),
+        };
+        assert_eq!(
+            select_candidate(&[account], "current").map(|a| a.id.as_str()),
+            Some("candidate")
+        );
     }
 }

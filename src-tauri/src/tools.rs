@@ -343,6 +343,50 @@ if ($chat) {
     }
 }
 
+/// Give the interactive `codex resume` TUI a moment to load, then request the same session in
+/// the Codex desktop app. This is deliberately best-effort: if the desktop app is unavailable,
+/// the visible terminal remains the fallback surface instead of losing the resumed task.
+pub fn open_codex_session_in_app_after_resume(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let script = format!(
+            r#"
+$ErrorActionPreference = 'SilentlyContinue'
+Start-Sleep -Seconds 4
+Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Windows.Forms
+$p = Get-Process -Id {pid}
+if ($p -and $p.MainWindowHandle -ne 0) {{
+  [Microsoft.VisualBasic.Interaction]::AppActivate($p.Id) | Out-Null
+  Start-Sleep -Milliseconds 250
+  [System.Windows.Forms.SendKeys]::SendWait('/app')
+  [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
+}}
+"#
+        );
+        let _ = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+    }
+}
+
 #[cfg(test)]
 mod codex_ide_credential_tests {
     use super::*;

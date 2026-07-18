@@ -974,37 +974,43 @@ impl ManagedState {
             return Ok(());
         }
 
-        let Some(file) = latest_rollout_file(&sessions_dir) else {
-            return Ok(());
-        };
-        let key = file.to_string_lossy().to_string();
-        if let Ok(mut active) = self.codex_active_rollout.lock() {
-            *active = Some(file.clone());
-        }
-        let len = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-        let start = {
-            let mut guard = self
-                .codex_quota_watch
-                .lock()
-                .map_err(|_| anyhow::anyhow!("watch lock poisoned"))?;
-            let entry = guard.entry(key.clone()).or_insert(len);
-            if *entry > len {
-                *entry = 0;
+        // Shared session history can contain several active rollouts. Inspect every file with a
+        // newly appended tail and bind the handoff to the exact file that emitted the quota line;
+        // never overwrite it with whichever rollout happens to have the newest mtime.
+        for file in rollout_files(&sessions_dir) {
+            let key = file.to_string_lossy().to_string();
+            let len = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+            let start = {
+                let mut guard = self
+                    .codex_quota_watch
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("watch lock poisoned"))?;
+                let entry = guard.entry(key).or_insert(len);
+                if *entry > len {
+                    *entry = 0;
+                }
+                let start = *entry;
+                *entry = len;
+                start
+            };
+            if start == len {
+                continue;
             }
-            let start = *entry;
-            *entry = len;
-            start
-        };
-        if start == len {
-            return Ok(());
-        }
-
-        let text = read_file_tail_from(&file, start)?;
-        if text.lines().any(codex_quota_error_line) {
-            // Refresh first so the UI/quota model catches up, then force the manual-switch runtime
-            // refresh path if the stored quota has crossed the threshold.
-            let _ = self.refresh_tool(ToolId::Codex, app);
-            self.maybe_auto_switch(&ToolId::Codex, threshold, app)?;
+            let text = read_file_tail_from(&file, start)?;
+            if text.lines().any(codex_quota_error_line) {
+                if let Ok(mut active) = self.codex_active_rollout.lock() {
+                    *active = Some(file.clone());
+                }
+                // Refresh first so the UI/quota model catches up, then force the manual-switch
+                // runtime refresh path. The explicit rollout binding above survives refreshes.
+                let _ = self.refresh_tool(ToolId::Codex, app);
+                self.try_seamless_codex_handoff(
+                    threshold.min(crate::seamless::DEFAULT_HANDOFF_THRESHOLD),
+                    true,
+                    app,
+                )?;
+                break;
+            }
         }
         Ok(())
     }
@@ -2171,6 +2177,7 @@ impl ManagedState {
         if tool_id == &ToolId::Codex {
             self.try_seamless_codex_handoff(
                 threshold.min(crate::seamless::DEFAULT_HANDOFF_THRESHOLD),
+                false,
                 app,
             )?;
             return Ok(());
@@ -2289,9 +2296,14 @@ impl ManagedState {
         Ok(())
     }
 
-    fn try_seamless_codex_handoff(&self, threshold: f64, app: Option<&AppHandle>) -> Result<bool> {
+    fn try_seamless_codex_handoff(
+        &self,
+        threshold: f64,
+        forced_quota_error: bool,
+        app: Option<&AppHandle>,
+    ) -> Result<bool> {
         use crate::models::{ResumeJob, ResumeJobStatus};
-        let (current, event_key, used) = {
+        let (current, event_key, used, explicit_quota_error) = {
             let data = self
                 .data
                 .lock()
@@ -2311,17 +2323,25 @@ impl ManagedState {
             let used = account
                 .quota
                 .as_ref()
-                .and_then(|q| q.five_hour.percent_used)
-                .unwrap_or(0.0);
-            if used < threshold {
+                .and_then(|q| q.five_hour.percent_used);
+            let explicit_quota_error = forced_quota_error
+                || account
+                    .quota
+                    .as_ref()
+                    .and_then(|q| q.error.as_ref())
+                    .is_some();
+            if !crate::seamless::should_start_handoff(used, explicit_quota_error, threshold) {
                 return Ok(false);
             }
             let event = account
                 .quota
                 .as_ref()
                 .and_then(|q| q.five_hour.reset_at.clone())
-                .unwrap_or_else(|| format!("five-hour-{used:.2}"));
-            (account.clone(), event, used)
+                .unwrap_or_else(|| {
+                    used.map(|value| format!("five-hour-{value:.2}"))
+                        .unwrap_or_else(|| "quota-error-unknown-window".into())
+                });
+            (account.clone(), event, used, explicit_quota_error)
         };
 
         let rollout = self
@@ -2340,7 +2360,10 @@ impl ManagedState {
         let Some((mut checkpoint, checkpoint_path)) = checkpoint_result else {
             return Ok(true);
         };
-        if !crate::seamless::should_checkpoint(Some(used), checkpoint.idle) {
+        if !crate::seamless::should_checkpoint(
+            used.or(explicit_quota_error.then_some(100.0)),
+            checkpoint.idle,
+        ) {
             return Ok(true);
         }
 
@@ -2396,7 +2419,8 @@ impl ManagedState {
                     job.session_id == checkpoint.session_id && job.event_key == event_key
                 }) {
                     job.status = ResumeJobStatus::Failed;
-                    job.error = Some("no eligible candidate below 95%".into());
+                    job.error =
+                        Some("no eligible candidate with healthy auth and weekly quota".into());
                     job.updated_at = now();
                 }
                 let _ = self.store.save(&data);
@@ -2460,7 +2484,10 @@ impl ManagedState {
                 .and_then(|account| account.quota.as_ref())
                 .is_some_and(|quota| {
                     quota.error.is_none()
-                        && quota.five_hour.percent_used.is_some()
+                        && quota
+                            .five_hour
+                            .percent_used
+                            .is_none_or(|value| value < 95.0)
                         && quota.weekly.percent_used.is_some_and(|value| value < 100.0)
                 });
             if !verified {
@@ -3574,9 +3601,9 @@ fn auto_switch_target<'a>(
     best_replacement(accounts, tool_id, threshold, Some(active_id))
 }
 
-fn latest_rollout_file(sessions_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+fn rollout_files(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut stack = vec![sessions_dir.to_path_buf()];
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let mut files = Vec::new();
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -3594,16 +3621,11 @@ fn latest_rollout_file(sessions_dir: &std::path::Path) -> Option<std::path::Path
             if !is_rollout {
                 continue;
             }
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            if best.as_ref().is_none_or(|(current, _)| modified > *current) {
-                best = Some((modified, path));
-            }
+            files.push(path);
         }
     }
-    best.map(|(_, path)| path)
+    files.sort();
+    files
 }
 
 fn read_file_tail_from(path: &std::path::Path, offset: u64) -> Result<String> {
