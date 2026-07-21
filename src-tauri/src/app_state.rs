@@ -3766,6 +3766,9 @@ fn quota_requires_reauth(tool_id: &ToolId, quota: &QuotaInfo) -> bool {
     if *tool_id != ToolId::Codex {
         return false;
     }
+    if quota_error_is_transient(quota) {
+        return false;
+    }
     let Some(error) = quota.error.as_deref() else {
         return false;
     };
@@ -3773,6 +3776,10 @@ fn quota_requires_reauth(tool_id: &ToolId, quota: &QuotaInfo) -> bool {
     lower.contains("401")
         || lower.contains("couldn't get codex's access_token")
         || lower.contains("access_token")
+        || lower.contains("codex authentication missing")
+        || lower.contains("codex authentication invalid")
+        || lower.contains("codex refresh_token missing")
+        || lower.contains("codex token refresh rejected")
 }
 
 const QUOTA_REFRESH_CONCURRENCY: usize = 3;
@@ -3796,6 +3803,11 @@ fn quota_error_is_transient(quota: &QuotaInfo) -> bool {
         || lower.contains("connection reset")
         || lower.contains("connection refused")
         || lower.contains("dns error")
+        || lower.contains("codex token refresh response invalid")
+        || lower.contains("codex token refresh failed: http 500")
+        || lower.contains("codex token refresh failed: http 502")
+        || lower.contains("codex token refresh failed: http 503")
+        || lower.contains("codex token refresh failed: http 504")
 }
 
 fn retry_quota_read<Read, Wait>(mut read: Read, mut wait: Wait) -> QuotaInfo
@@ -4306,9 +4318,8 @@ mod tests {
 
     #[test]
     fn rejected_refresh_token_requires_reauthentication() {
-        let quota = QuotaInfo::with_message(
-            "Couldn't read quota: Codex token refresh rejected: HTTP 400",
-        );
+        let quota =
+            QuotaInfo::with_message("Couldn't read quota: Codex token refresh rejected: HTTP 400");
 
         assert!(!quota_error_is_transient(&quota));
         assert!(quota_requires_reauth(&ToolId::Codex, &quota));

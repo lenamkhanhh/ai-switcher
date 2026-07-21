@@ -584,8 +584,7 @@ pub(crate) fn read_live_five_hour(tool_id: &ToolId, config_dir: &Path) -> Option
 }
 
 fn read_codex_usage_endpoint(config_dir: &Path) -> Result<QuotaInfo> {
-    let token =
-        codex_access_token_fresh(config_dir).context("couldn't get Codex's access_token")?;
+    let token = codex_access_token_fresh_result(config_dir)?;
     let body = curl_get(
         "https://chatgpt.com/backend-api/wham/usage",
         &[
@@ -599,20 +598,38 @@ fn read_codex_usage_endpoint(config_dir: &Path) -> Result<QuotaInfo> {
 }
 
 pub(crate) fn codex_access_token_fresh(config_dir: &Path) -> Option<String> {
+    codex_access_token_fresh_result(config_dir).ok()
+}
+
+fn codex_access_token_fresh_result(config_dir: &Path) -> Result<String> {
     static REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = REFRESH_LOCK.get_or_init(|| Mutex::new(())).lock().ok()?;
+    let _guard = REFRESH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Codex token refresh lock poisoned"))?;
     let path = config_dir.join("auth.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let mut value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let tokens = value.get("tokens")?;
-    let access_token = tokens.get("access_token")?.as_str()?.to_string();
+    let raw = std::fs::read_to_string(&path).context("Codex authentication missing")?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).context("Codex authentication invalid")?;
+    let tokens = value
+        .get("tokens")
+        .context("Codex authentication missing")?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .context("Codex access_token missing")?
+        .to_string();
     if jwt_expiry(&access_token).is_none_or(|expiry| expiry > chrono::Utc::now().timestamp() + 300)
     {
-        return Some(access_token);
+        return Ok(access_token);
     }
 
-    let refresh_token = tokens.get("refresh_token")?.as_str()?.to_string();
-    let response = reqwest::blocking::Client::new()
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .context("Codex refresh_token missing")?
+        .to_string();
+    let response = http_client(Duration::from_secs(15))?
         .post("https://auth.openai.com/oauth/token")
         .form(&[
             ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
@@ -620,13 +637,26 @@ pub(crate) fn codex_access_token_fresh(config_dir: &Path) -> Option<String> {
             ("refresh_token", refresh_token.as_str()),
         ])
         .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
+        .context("network error refreshing Codex token")?;
+    let status = response.status();
+    if !status.is_success() {
+        if matches!(status.as_u16(), 400 | 401) {
+            anyhow::bail!("Codex token refresh rejected: HTTP {}", status.as_u16());
+        }
+        anyhow::bail!("Codex token refresh failed: HTTP {}", status.as_u16());
+    }
+    let response = response
         .json::<serde_json::Value>()
-        .ok()?;
-    let new_access = response.get("access_token")?.as_str()?.to_string();
-    let tokens = value.get_mut("tokens")?.as_object_mut()?;
+        .context("Codex token refresh response invalid")?;
+    let new_access = response
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .context("Codex token refresh response missing access_token")?
+        .to_string();
+    let tokens = value
+        .get_mut("tokens")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("Codex authentication invalid")?;
     tokens.insert(
         "access_token".to_string(),
         serde_json::Value::String(new_access.clone()),
@@ -640,15 +670,16 @@ pub(crate) fn codex_access_token_fresh(config_dir: &Path) -> Option<String> {
         }
     }
     value["last_refresh"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
-    let encoded = serde_json::to_vec_pretty(&value).ok()?;
+    let encoded =
+        serde_json::to_vec_pretty(&value).context("couldn't encode Codex authentication")?;
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, encoded).ok()?;
+    std::fs::write(&temporary, encoded).context("couldn't stage refreshed Codex authentication")?;
     let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
-    std::fs::rename(&temporary, &path).ok()?;
+    std::fs::rename(&temporary, &path).context("couldn't save refreshed Codex authentication")?;
     if let Some(permissions) = permissions {
         let _ = std::fs::set_permissions(&path, permissions);
     }
-    Some(new_access)
+    Ok(new_access)
 }
 
 fn jwt_expiry(token: &str) -> Option<i64> {
@@ -1081,7 +1112,8 @@ mod tests {
 
     #[test]
     fn reads_codex_account_email_from_access_token_when_id_token_is_missing() {
-        let dir = std::env::temp_dir().join(format!("aisw-codex-email-access-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("aisw-codex-email-access-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"email":"fallback@example.com","sub":"account"}"#);
