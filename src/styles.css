@@ -643,6 +643,7 @@ button.danger:hover:not(:disabled) {
 .sidebarNavCopy {
   display: flex;
   flex-direction: column;
+  font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif;
   gap: 4px;
   min-width: 0;
   position: relative;
@@ -650,15 +651,19 @@ button.danger:hover:not(:disabled) {
 
 .sidebarNavCopy strong {
   color: #cfc7ba;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 16px;
-  font-weight: 400;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
   line-height: 1.2;
 }
 
 .sidebarNavCopy small {
   color: #817f7b;
-  font-size: 11.5px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
   line-height: 1.2;
 }
 
@@ -2395,7 +2400,8 @@ button.danger:hover:not(:disabled) {
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  margin-bottom: 25px;
+  margin: 0 auto 25px;
+  width: min(100%, 960px);
 }
 .tokenActivityHead strong {
   font-size: 13.5px;
@@ -2424,8 +2430,10 @@ button.danger:hover:not(:disabled) {
   color: var(--text-2);
 }
 .activityCalendar {
+  margin-inline: auto;
   min-width: 0;
   position: relative;
+  width: min(100%, 960px);
 }
 .activityGrid {
   display: grid;
