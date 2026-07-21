@@ -861,6 +861,14 @@ export function App() {
                     }
                     onRefreshQuota={() => void refreshOneAccount(currentTool.id, account.id)}
                     refreshingQuota={refreshingAccounts.has(account.id)}
+                    onReauthenticate={() =>
+                      run(
+                        `reauth-${account.id}`,
+                        () => api.reauthenticateAccount(currentTool.id, account.id),
+                        undefined,
+                        "A separate sign-in window was opened. Approve the Codex device code; quota will refresh automatically.",
+                      )
+                    }
                   />
                 ))
               )}
@@ -1978,6 +1986,7 @@ function AccountCard({
   onDelete,
   onRefreshQuota,
   refreshingQuota,
+  onReauthenticate,
 }: {
   account: Account;
   tool: ToolStatus;
@@ -1989,6 +1998,7 @@ function AccountCard({
   onDelete: () => void;
   onRefreshQuota: () => void;
   refreshingQuota: boolean;
+  onReauthenticate: () => void;
 }) {
   const isAntigravity = tool.id === "antigravity";
   const isApi = !!account.apiProvider;
@@ -1996,6 +2006,7 @@ function AccountCard({
   const isActive = account.id === tool.activeAccountId || account.state === "active";
   const exhausted = account.state === "exhausted";
   const needsLogin = account.state === "needs-login";
+  const canReauthenticate = needsLogin && tool.id === "codex" && !account.isDefault && !isApi;
 
   return (
     <article className={`account ${isActive ? "active" : ""} ${exhausted ? "exhausted" : ""}`}>
@@ -2056,14 +2067,21 @@ function AccountCard({
 
       {needsLogin && (
         <div className="pendingLogin">
-          <Loader2 className="spin" />
+          {canReauthenticate ? <ShieldAlert /> : <Loader2 className="spin" />}
           <span>
             {isAntigravity
               ? "Waiting for sign-in in the Antigravity IDE window - the app will detect it."
               : tool.id === "codex"
-                ? "Waiting for browser approval - the code appears in this app."
+                ? canReauthenticate
+                  ? "Codex sign-in expired. Start re-login to refresh this account's quota."
+                  : "Waiting for browser approval - the code appears in this app."
                 : "Waiting for login in Terminal - the app will detect it."}
           </span>
+          {canReauthenticate && (
+            <button type="button" onClick={onReauthenticate} disabled={busy !== null}>
+              <LogIn /> Re-login
+            </button>
+          )}
         </div>
       )}
 

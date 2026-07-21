@@ -2516,6 +2516,18 @@ button.danger:hover:not(:disabled) {
   height: 15px;
   flex: none;
 }
+.pendingLogin button {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  margin-left: auto;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+.pendingLogin button svg {
+  height: 13px;
+  width: 13px;
+}
 
 /* ---------- API / proxy accounts ---------- */
 

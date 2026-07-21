@@ -65,6 +65,20 @@ async fn refresh_account(
 }
 
 #[tauri::command]
+fn reauthenticate_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state
+        .reauthenticate_account(&app, tool_id, &account_id)
+        .map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn add_account(
     app: tauri::AppHandle,
     state: State<'_, ManagedState>,
@@ -428,6 +442,7 @@ pub fn run() {
             load_snapshot,
             refresh_tool,
             refresh_account,
+            reauthenticate_account,
             add_account,
             add_api_account,
             fetch_gateway_models,

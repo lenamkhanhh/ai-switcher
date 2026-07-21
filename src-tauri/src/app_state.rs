@@ -17,8 +17,8 @@ use crate::tools::{
     launch_profile_login, launcher_name_collides_with_system, launcher_paths,
     link_shared_config_to, link_shared_sessions_to, refresh_codex_frontends_after_switch,
     remove_launcher, restart_codex_runtime_after_switch, sync_codex_ide_credentials,
-    write_active_profile, write_api_key_file, write_api_launcher, write_claude_proxy_settings,
-    write_codex_proxy_config, write_launcher,
+    sync_reauthenticated_codex_credentials, write_active_profile, write_api_key_file,
+    write_api_launcher, write_claude_proxy_settings, write_codex_proxy_config, write_launcher,
 };
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -825,6 +825,7 @@ impl ManagedState {
             let timestamp = now();
             let mut exhausted = Vec::new();
             for (account_id, quota) in results {
+                let requires_reauth = quota_requires_reauth(&tool_id, &quota);
                 if let Some(account) = data
                     .accounts
                     .iter_mut()
@@ -833,7 +834,9 @@ impl ManagedState {
                     let was_exhausted = account.state == AccountState::Exhausted;
                     account.quota = Some(quota);
                     account.updated_at = timestamp.clone();
-                    account.state = if is_exhausted(account) {
+                    account.state = if requires_reauth && !account.is_default {
+                        AccountState::NeedsLogin
+                    } else if is_exhausted(account) {
                         AccountState::Exhausted
                     } else if was_exhausted {
                         AccountState::Idle
@@ -902,6 +905,7 @@ impl ManagedState {
 
         // Phase 2: HTTP call — no mutex held.
         let quota = read_quota(tool_id, &config_dir);
+        let requires_reauth = quota_requires_reauth(tool_id, &quota);
 
         // Phase 3: write back — brief lock.
         let exhausted: Option<Account> = {
@@ -918,7 +922,9 @@ impl ManagedState {
                 let was_exhausted = account.state == AccountState::Exhausted;
                 account.quota = Some(quota);
                 account.updated_at = now();
-                account.state = if is_exhausted(account) {
+                account.state = if requires_reauth && !account.is_default {
+                    AccountState::NeedsLogin
+                } else if is_exhausted(account) {
                     AccountState::Exhausted
                 } else if was_exhausted {
                     AccountState::Idle
@@ -2582,6 +2588,10 @@ impl ManagedState {
         if !crate::tools::profile_has_credentials(tool_id, &config_dir) {
             return Ok(false);
         }
+        let quota = read_quota(tool_id, &config_dir);
+        if quota_requires_reauth(tool_id, &quota) {
+            return Ok(false);
+        }
         // Seed the onboarding flag only after login completes (claude auth login overwrites
         // .claude.json, so it must be seeded AFTERWARD) — so interactive mode skips the wizard.
         // Re-link the shared session after login too (login may create the real dir).
@@ -2600,6 +2610,8 @@ impl ManagedState {
             .data
             .lock()
             .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let was_active = active_account_id_for(&self.store, tool_id, &data.accounts)
+            .is_some_and(|active| active == account_id);
         if let Some(account) = data
             .accounts
             .iter_mut()
@@ -2607,12 +2619,88 @@ impl ManagedState {
         {
             if account.state == AccountState::NeedsLogin {
                 account.state = AccountState::Idle;
-                account.quota = Some(read_quota(tool_id, &config_dir));
+                account.quota = Some(quota);
                 account.updated_at = now();
             }
         }
         self.store.save(&data)?;
+        crate::tools::clear_codex_reauth_pending(&config_dir);
+        drop(data);
+        if was_active && *tool_id == ToolId::Codex {
+            let default_dir = {
+                let data = self
+                    .data
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+                resolved_default_config_dir(&data, tool_id)
+            };
+            sync_reauthenticated_codex_credentials(&config_dir, &default_dir)?;
+            restart_codex_runtime_after_switch();
+        }
         Ok(true)
+    }
+
+    pub fn reauthenticate_account(
+        &self,
+        app: &AppHandle,
+        tool_id: ToolId,
+        account_id: &str,
+    ) -> Result<AppSnapshot> {
+        if tool_id != ToolId::Codex {
+            anyhow::bail!("Re-login is currently available for Codex accounts only");
+        }
+        let (default_dir, binary, profile) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let account = data
+                .accounts
+                .iter()
+                .find(|a| a.tool_id == tool_id && a.id == account_id)
+                .context("Codex account not found")?;
+            if account.is_default || account.api_provider.is_some() {
+                anyhow::bail!("Machine default and API accounts cannot be re-authenticated here");
+            }
+            (
+                resolved_default_config_dir(&data, &tool_id),
+                configured_binary_path(&data, &tool_id).context("Codex CLI is not configured")?,
+                account_config_dir_with_default(
+                    &self.store,
+                    account,
+                    &resolved_default_config_dir(&data, &tool_id),
+                ),
+            )
+        };
+        crate::tools::mark_codex_reauth_pending(&profile)?;
+        {
+            let mut data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            if let Some(account) = data
+                .accounts
+                .iter_mut()
+                .find(|a| a.tool_id == tool_id && a.id == account_id)
+            {
+                account.state = AccountState::NeedsLogin;
+                account.quota = Some(QuotaInfo::with_message(
+                    "Codex sign-in expired — approve the new device code",
+                ));
+                account.updated_at = now();
+            }
+            self.store.save(&data)?;
+        }
+        launch_profile_login(
+            &tool_id,
+            &self.store,
+            account_id,
+            &default_dir,
+            &binary,
+            Some(app.clone()),
+        )?;
+        spawn_login_watch(app.clone(), tool_id, account_id.to_string());
+        self.snapshot()
     }
 
     pub fn add_account(&self, app: &AppHandle, input: AddAccountInput) -> Result<AppSnapshot> {
@@ -3647,6 +3735,19 @@ fn codex_quota_error_line(line: &str) -> bool {
             || lower.contains("limit"))
 }
 
+fn quota_requires_reauth(tool_id: &ToolId, quota: &QuotaInfo) -> bool {
+    if *tool_id != ToolId::Codex {
+        return false;
+    }
+    let Some(error) = quota.error.as_deref() else {
+        return false;
+    };
+    let lower = error.to_ascii_lowercase();
+    lower.contains("401")
+        || lower.contains("couldn't get codex's access_token")
+        || lower.contains("access_token")
+}
+
 /// The best replacement account: same tool, not `excluded`, not yet at the threshold,
 /// logged in (Idle/Active), with the most quota left. The Default account is eligible.
 fn best_replacement<'a>(
@@ -4067,6 +4168,15 @@ mod tests {
         assert!(codex_quota_error_line("HTTP 429 quota exhausted"));
         assert!(!codex_quota_error_line("refresh quota button clicked"));
         assert!(!codex_quota_error_line("normal assistant message"));
+    }
+
+    #[test]
+    fn codex_401_requires_reauthentication_but_unknown_quota_does_not() {
+        let mut quota = QuotaInfo::with_message("Couldn't read quota: HTTP 401");
+        assert!(quota_requires_reauth(&ToolId::Codex, &quota));
+        quota.error = None;
+        assert!(!quota_requires_reauth(&ToolId::Codex, &quota));
+        assert!(!quota_requires_reauth(&ToolId::Claude, &QuotaInfo::with_message("HTTP 401")));
     }
 
     #[test]

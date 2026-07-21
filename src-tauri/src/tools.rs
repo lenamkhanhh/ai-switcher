@@ -565,10 +565,6 @@ fn codex_device_auth_url() -> &'static str {
     "https://auth.openai.com/codex/device"
 }
 
-fn chrome_local_state_path() -> PathBuf {
-    home_dir().join("AppData/Local/Google/Chrome/User Data/Local State")
-}
-
 fn chrome_binary_path() -> Option<PathBuf> {
     let candidates = [
         PathBuf::from("C:/Program Files/Google/Chrome/Application/chrome.exe"),
@@ -581,52 +577,64 @@ fn chrome_binary_path() -> Option<PathBuf> {
         .or_else(|| command_path("chrome"))
 }
 
-fn chrome_profile_from_local_state_text(text: &str) -> Option<String> {
-    let doc: Value = serde_json::from_str(text).ok()?;
-    let info_cache = doc.get("profile")?.get("info_cache")?.as_object()?;
-    let newest = info_cache
-        .iter()
-        .filter_map(|(profile, entry)| {
-            entry
-                .get("active_time")?
-                .as_f64()
-                .map(|active| (profile.clone(), active))
-        })
-        .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        .map(|(profile, _)| profile);
-    newest.or_else(|| {
-        doc.get("profile")?
-            .get("last_used")?
-            .as_str()
-            .map(str::to_string)
-    })
+fn isolated_codex_login_chrome_args(user_data_dir: &Path) -> Vec<String> {
+    vec![
+        format!("--user-data-dir={}", user_data_dir.to_string_lossy()),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--new-window".into(),
+        codex_device_auth_url().into(),
+    ]
 }
 
-fn last_used_chrome_profile() -> Option<String> {
-    fs::read_to_string(chrome_local_state_path())
-        .ok()
-        .and_then(|text| chrome_profile_from_local_state_text(&text))
-}
-
-fn open_codex_device_auth_in_latest_chrome_profile() -> bool {
+fn open_codex_device_auth_in_isolated_profile(store: &Store, account_id: &str) -> bool {
     if !cfg!(windows) {
         return false;
     }
     let Some(chrome) = chrome_binary_path() else {
         return false;
     };
-    let Some(profile) = last_used_chrome_profile() else {
+    let browser_profile = store
+        .account_dir(&ToolId::Codex, account_id)
+        .join("login-browser");
+    if fs::create_dir_all(&browser_profile).is_err() {
         return false;
-    };
+    }
     Command::new(chrome)
-        .args([
-            "--profile-directory",
-            profile.as_str(),
-            "--new-window",
-            codex_device_auth_url(),
-        ])
+        .args(isolated_codex_login_chrome_args(&browser_profile))
         .spawn()
         .is_ok()
+}
+
+fn codex_reauth_marker(profile: &Path) -> PathBuf {
+    profile.join(".reauth-pending")
+}
+
+pub fn mark_codex_reauth_pending(profile: &Path) -> Result<()> {
+    let auth = fs::read(profile.join("auth.json")).unwrap_or_default();
+    let digest = Sha256::digest(&auth);
+    fs::write(codex_reauth_marker(profile), format!("{digest:x}"))?;
+    Ok(())
+}
+
+pub fn clear_codex_reauth_pending(profile: &Path) {
+    let _ = fs::remove_file(codex_reauth_marker(profile));
+}
+
+pub fn sync_reauthenticated_codex_credentials(profile: &Path, default_dir: &Path) -> Result<()> {
+    copy_codex_auth(&profile.join("auth.json"), &default_dir.join("auth.json"))
+}
+
+fn codex_has_fresh_reauth(profile: &Path) -> bool {
+    let auth = match fs::read(profile.join("auth.json")) {
+        Ok(auth) if !auth.is_empty() => auth,
+        _ => return false,
+    };
+    let marker = codex_reauth_marker(profile);
+    let Ok(previous_digest) = fs::read_to_string(marker) else {
+        return true;
+    };
+    format!("{:x}", Sha256::digest(auth)) != previous_digest.trim()
 }
 
 /// Path to the Antigravity IDE .app (to open with `open`).
@@ -887,14 +895,7 @@ pub fn launch_login(tool_id: &ToolId) -> Result<()> {
     match tool_id {
         // Claude 2.x does NOT have `claude login` — it must be `claude auth login`.
         ToolId::Claude => run_login_command("claude", &["auth", "login"]),
-        ToolId::Codex => {
-            let args = if open_codex_device_auth_in_latest_chrome_profile() {
-                vec!["login", "--device-auth"]
-            } else {
-                vec!["login"]
-            };
-            run_login_command("codex", &args)
-        }
+        ToolId::Codex => run_login_command("codex", &["login", "--device-auth"]),
         ToolId::Antigravity => {
             if Path::new("/Applications/Antigravity.app").exists() {
                 Command::new("open")
@@ -1180,11 +1181,8 @@ pub fn launch_profile_login(
             app,
         ),
         ToolId::Codex => {
-            let args = if open_codex_device_auth_in_latest_chrome_profile() {
-                vec!["login", "--device-auth"]
-            } else {
-                vec!["login"]
-            };
+            let _ = open_codex_device_auth_in_isolated_profile(store, account_id);
+            let args = vec!["login", "--device-auth"];
             run_profile_login_command(
                 binary_path,
                 "CODEX_HOME",
@@ -1208,7 +1206,7 @@ pub fn profile_has_credentials(tool_id: &ToolId, config_dir: &Path) -> bool {
             keychain_service_exists(&format!("Claude Code-credentials-{suffix}"))
         }
         // Codex stores the token in a file inside CODEX_HOME.
-        ToolId::Codex => config_dir.join("auth.json").exists(),
+        ToolId::Codex => codex_has_fresh_reauth(config_dir),
         // Antigravity IDE: the token lives in the account's own userData state.vscdb.
         ToolId::Antigravity => antigravity_logged_in(config_dir),
     }
@@ -1827,34 +1825,32 @@ mod tests {
     }
 
     #[test]
-    fn chrome_local_state_prefers_most_recent_active_profile() {
-        let text = r#"{
-          "profile": {
-            "last_used": "Default",
-            "info_cache": {
-              "Default": { "active_time": 10.0 },
-              "Profile 3": { "active_time": 20.0 }
-            }
-          }
-        }"#;
-        assert_eq!(
-            chrome_profile_from_local_state_text(text).as_deref(),
-            Some("Profile 3")
-        );
+    fn codex_login_uses_an_isolated_chrome_user_data_dir() {
+        let args = isolated_codex_login_chrome_args(Path::new("C:/isolated/acc8"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--user-data-dir=C:/isolated/acc8"));
+        assert!(args.iter().any(|arg| arg == "--new-window"));
+        assert!(args.iter().any(|arg| arg == codex_device_auth_url()));
+        assert!(!args.iter().any(|arg| arg == "--profile-directory"));
     }
 
     #[test]
-    fn chrome_local_state_falls_back_to_last_used() {
-        let text = r#"{
-          "profile": {
-            "last_used": "Profile 7",
-            "info_cache": {}
-          }
-        }"#;
-        assert_eq!(
-            chrome_profile_from_local_state_text(text).as_deref(),
-            Some("Profile 7")
-        );
+    fn reauth_requires_auth_json_to_change() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-switcher-reauth-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("auth.json"), b"old-auth").unwrap();
+        mark_codex_reauth_pending(&root).unwrap();
+        assert!(!codex_has_fresh_reauth(&root));
+        fs::write(root.join("auth.json"), b"new-auth").unwrap();
+        assert!(codex_has_fresh_reauth(&root));
+        clear_codex_reauth_pending(&root);
+        assert!(codex_has_fresh_reauth(&root));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -423,6 +423,8 @@ export const api = {
   refreshTool: (toolId: ToolId) => invoke<AppSnapshot>("refresh_tool", { toolId }),
   refreshAccount: (toolId: ToolId, accountId: string) =>
     invoke<AppSnapshot>("refresh_account", { toolId, accountId }),
+  reauthenticateAccount: (toolId: ToolId, accountId: string) =>
+    invoke<AppSnapshot>("reauthenticate_account", { toolId, accountId }),
   addAccount: (input: AddAccountInput) => invoke<AppSnapshot>("add_account", { input }),
   addApiAccount: (input: AddApiAccountInput) => invoke<AppSnapshot>("add_api_account", { input }),
   fetchGatewayModels: (baseUrl: string, apiKey: string) =>
