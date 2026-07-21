@@ -622,3 +622,9 @@ Sau thay đổi hoặc rollback: mở thread mới/restart Codex và ghi sự ki
 - Verification: `cargo test --lib` passed 92/92, `npm.cmd run build` passed (1,590 modules), `npm.cmd run tauri build` produced MSI and NSIS bundles, and `git diff --check` passed. Existing retired Auto Ping dead-code warnings remain unchanged.
 - Installation: NSIS exited 0. Installed and release SHA-256 both equal `A1BE0A0EC34A5E88E86F2C15D5E9B42ABD8AFA12000682D33AA85D37233836D1`.
 - Live limitation: the installed app was launched successfully, but no real re-login was triggered; the current `acc8` HTTP 401 flow is covered by unit tests and the new UI path, while the user must click Re-login and approve the device code once to exercise the external OAuth step.
+
+### 2026-07-21 - Always show the Codex login email on account cards
+- Kept the existing card email display and hardened backend identity extraction: read the login email from the Codex `id_token`, with an `access_token` claim fallback when the provider omits the id token email claim. No token contents are sent to the UI.
+- Verification: `cargo test --lib` passed 93/93, `npm.cmd run build` passed (1,590 modules), `npm.cmd run tauri build` produced MSI and NSIS bundles, and `git diff --check` passed.
+- Installation: NSIS exited 0. Installed and release SHA-256 both equal `52B24FED41774FDFA20196B4BFFFFFB13F2DC18CE59EB7F39CDEA92C1B4CF371`.
+- Live limitation: the installed app was restarted with real account state; email extraction was not forced through a new login because that would require changing the user's OAuth session. Existing cards with valid tokens display the login email, and missing-id-token coverage is unit-tested.

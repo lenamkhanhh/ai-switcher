@@ -675,11 +675,16 @@ pub(crate) fn codex_account_id(config_dir: &Path) -> Option<String> {
 pub(crate) fn codex_account_email(config_dir: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(config_dir.join("auth.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let id_token = value
-        .get("tokens")
-        .and_then(|tokens| tokens.get("id_token"))
-        .and_then(serde_json::Value::as_str)?;
-    jwt_claim_string(id_token, "email").filter(|email| email.contains('@'))
+    let tokens = value.get("tokens")?;
+    for field in ["id_token", "access_token"] {
+        let Some(token) = tokens.get(field).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if let Some(email) = jwt_claim_string(token, "email").filter(|email| email.contains('@')) {
+            return Some(email);
+        }
+    }
+    None
 }
 
 fn jwt_claim_string(token: &str, claim: &str) -> Option<String> {
@@ -1070,6 +1075,25 @@ mod tests {
         assert_eq!(
             codex_account_email(&dir).as_deref(),
             Some("dev@example.com")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_codex_account_email_from_access_token_when_id_token_is_missing() {
+        let dir = std::env::temp_dir().join(format!("aisw-codex-email-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"email":"fallback@example.com","sub":"account"}"#);
+        std::fs::write(
+            dir.join("auth.json"),
+            format!(r#"{{"tokens":{{"access_token":"header.{payload}.signature"}}}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_account_email(&dir).as_deref(),
+            Some("fallback@example.com")
         );
         let _ = std::fs::remove_dir_all(dir);
     }
