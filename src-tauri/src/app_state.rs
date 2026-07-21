@@ -4202,6 +4202,54 @@ mod tests {
     }
 
     #[test]
+    fn transient_quota_timeout_retries_then_returns_success() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let quota = retry_quota_read(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    QuotaInfo::with_message(
+                        "Couldn't read quota: network error: operation timed out",
+                    )
+                } else {
+                    test_account("success", AccountState::Idle, 10.0)
+                        .quota
+                        .expect("test quota")
+                }
+            },
+            |_| waits += 1,
+        );
+
+        assert_eq!(attempts, 2);
+        assert_eq!(waits, 1);
+        assert!(quota.error.is_none());
+    }
+
+    #[test]
+    fn quota_401_is_not_retried() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let quota = retry_quota_read(
+            || {
+                attempts += 1;
+                QuotaInfo::with_message("Couldn't read quota: HTTP 401")
+            },
+            |_| waits += 1,
+        );
+
+        assert_eq!(attempts, 1);
+        assert_eq!(waits, 0);
+        assert!(quota_requires_reauth(&ToolId::Codex, &quota));
+    }
+
+    #[test]
+    fn quota_refresh_batches_limit_parallel_requests() {
+        assert_eq!(quota_refresh_batch_ranges(0), Vec::<std::ops::Range<usize>>::new());
+        assert_eq!(quota_refresh_batch_ranges(7), vec![0..3, 3..6, 6..7]);
+    }
+
+    #[test]
     fn startup_migration_marks_stale_codex_401_as_needs_login() {
         let mut account = test_account("acc-1", AccountState::Idle, 10.0);
         account.quota = Some(QuotaInfo::with_message("Couldn't read quota: HTTP 401"));
