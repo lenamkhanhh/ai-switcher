@@ -4295,6 +4295,26 @@ mod tests {
     }
 
     #[test]
+    fn token_refresh_network_timeout_retries_without_forcing_reauth() {
+        let quota = QuotaInfo::with_message(
+            "Couldn't read quota: couldn't get Codex's access_token: network error refreshing Codex token: operation timed out",
+        );
+
+        assert!(quota_error_is_transient(&quota));
+        assert!(!quota_requires_reauth(&ToolId::Codex, &quota));
+    }
+
+    #[test]
+    fn rejected_refresh_token_requires_reauthentication() {
+        let quota = QuotaInfo::with_message(
+            "Couldn't read quota: Codex token refresh rejected: HTTP 400",
+        );
+
+        assert!(!quota_error_is_transient(&quota));
+        assert!(quota_requires_reauth(&ToolId::Codex, &quota));
+    }
+
+    #[test]
     fn quota_refresh_batches_limit_parallel_requests() {
         assert_eq!(
             quota_refresh_batch_ranges(0),
