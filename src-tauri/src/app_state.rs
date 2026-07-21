@@ -841,6 +841,7 @@ impl ManagedState {
                     .find(|a| a.tool_id == tool_id && a.id == account_id)
                 {
                     let was_exhausted = account.state == AccountState::Exhausted;
+                    let quota = keep_last_quota_on_transient_failure(account.quota.as_ref(), quota);
                     account.quota = Some(quota);
                     account.updated_at = timestamp.clone();
                     account.state = if requires_reauth && !account.is_default {
@@ -929,6 +930,7 @@ impl ManagedState {
                 .find(|a| a.tool_id == *tool_id && a.id == account_id)
             {
                 let was_exhausted = account.state == AccountState::Exhausted;
+                let quota = keep_last_quota_on_transient_failure(account.quota.as_ref(), quota);
                 account.quota = Some(quota);
                 account.updated_at = now();
                 account.state = if requires_reauth && !account.is_default {
@@ -3810,6 +3812,31 @@ fn quota_error_is_transient(quota: &QuotaInfo) -> bool {
         || lower.contains("codex token refresh failed: http 504")
 }
 
+fn keep_last_quota_on_transient_failure(
+    previous: Option<&QuotaInfo>,
+    refreshed: QuotaInfo,
+) -> QuotaInfo {
+    if !quota_error_is_transient(&refreshed) {
+        return refreshed;
+    }
+    let Some(previous) = previous else {
+        return refreshed;
+    };
+    let has_known_quota = previous.five_hour.percent_used.is_some()
+        || previous.weekly.percent_used.is_some()
+        || previous
+            .models
+            .as_ref()
+            .is_some_and(|models| models.iter().any(|model| model.percent_used.is_some()));
+    if !has_known_quota {
+        return refreshed;
+    }
+
+    let mut stale = previous.clone();
+    stale.error = Some("Network issue; showing last known quota".to_string());
+    stale
+}
+
 fn retry_quota_read<Read, Wait>(mut read: Read, mut wait: Wait) -> QuotaInfo
 where
     Read: FnMut() -> QuotaInfo,
@@ -4304,6 +4331,42 @@ mod tests {
         assert_eq!(attempts, 1);
         assert_eq!(waits, 0);
         assert!(quota_requires_reauth(&ToolId::Codex, &quota));
+    }
+
+    #[test]
+    fn transient_refresh_failure_keeps_last_known_quota() {
+        let mut previous = QuotaInfo::with_message("unused");
+        previous.error = None;
+        previous.weekly.percent_used = Some(42.0);
+        previous.plan = Some("Plus".to_string());
+        let failure =
+            QuotaInfo::with_message("Couldn't read quota: network error: operation timed out");
+
+        let merged = keep_last_quota_on_transient_failure(Some(&previous), failure);
+
+        assert_eq!(merged.weekly.percent_used, Some(42.0));
+        assert_eq!(merged.plan.as_deref(), Some("Plus"));
+        assert_eq!(merged.updated_at, previous.updated_at);
+        assert_eq!(
+            merged.error.as_deref(),
+            Some("Network issue; showing last known quota")
+        );
+    }
+
+    #[test]
+    fn auth_failure_replaces_last_known_quota() {
+        let mut previous = QuotaInfo::with_message("unused");
+        previous.error = None;
+        previous.weekly.percent_used = Some(42.0);
+        let failure = QuotaInfo::with_message("Couldn't read quota: HTTP 401");
+
+        let merged = keep_last_quota_on_transient_failure(Some(&previous), failure);
+
+        assert_eq!(merged.weekly.percent_used, None);
+        assert_eq!(
+            merged.error.as_deref(),
+            Some("Couldn't read quota: HTTP 401")
+        );
     }
 
     #[test]

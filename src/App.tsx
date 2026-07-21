@@ -2187,12 +2187,17 @@ function AutoSwitchBar({
 
 function Quota({ quota }: { quota: Account["quota"] }) {
   if (!quota) return <p className="quotaError">No quota data yet</p>;
-  if (quota.error) return <p className="quotaError">{quota.error}</p>;
+  const hasKnownQuota =
+    quota.fiveHour.percentUsed !== null ||
+    quota.weekly.percentUsed !== null ||
+    quota.models?.some((model) => model.percentUsed !== null);
+  if (quota.error && !hasKnownQuota) return <p className="quotaError">{quota.error}</p>;
 
   // Antigravity: quota is reported per model instead of as a single overall window.
   if (quota.models && quota.models.length > 0) {
     return (
       <div className="quotaBox">
+        {quota.error && <p className="quotaWarning">{quota.error}</p>}
         <span className="quotaTitle">Quota by model</span>
         {quota.models.map((model) => (
           <QuotaBar key={model.label} label={model.label} percent={model.percentUsed} resetAt={model.resetAt} />
@@ -2203,6 +2208,7 @@ function Quota({ quota }: { quota: Account["quota"] }) {
 
   return (
     <div className="quotaBox">
+      {quota.error && <p className="quotaWarning">{quota.error}</p>}
       <QuotaBar label="5-hour limit" percent={quota.fiveHour.percentUsed} resetAt={quota.fiveHour.resetAt} />
       <QuotaBar label="Weekly limit" percent={quota.weekly.percentUsed} resetAt={quota.weekly.resetAt} />
     </div>
