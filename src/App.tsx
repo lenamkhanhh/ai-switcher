@@ -605,12 +605,14 @@ export function App() {
             <span className="sidebarBrandMark" aria-hidden>
               <img src={logoUrl} alt="" />
             </span>
-            <strong>AI Account Switcher</strong>
+            <strong>AI ACCOUNT SWITCHER</strong>
+            <span className="sidebarBrandRule" aria-hidden />
           </div>
 
           <div className="sidebarNav">
-            {snapshot.tools.map((tool) => (
+            {snapshot.tools.map((tool, index) => (
               <button
+                aria-current={view === "accounts" && tool.id === selectedTool ? "page" : undefined}
                 className={`toolTab ${view === "accounts" && tool.id === selectedTool ? "selected" : ""}`}
                 key={tool.id}
                 onClick={() => {
@@ -625,10 +627,14 @@ export function App() {
                   <strong>{tool.name}</strong>
                   <small>{tool.installed ? "Accounts" : "Tool not installed"}</small>
                 </span>
+                <span className="sidebarNavIndex" aria-hidden>
+                  {String(index + 1).padStart(2, "0")}
+                </span>
               </button>
             ))}
             {!isWindowsCodexOnly && (
               <button
+                aria-current={view === "api" ? "page" : undefined}
                 className={`toolTab ${view === "api" ? "selected" : ""}`}
                 onClick={() => setView("api")}
               >
@@ -639,9 +645,13 @@ export function App() {
                   <strong>API</strong>
                   <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
                 </span>
+                <span className="sidebarNavIndex" aria-hidden>
+                  {String(snapshot.tools.length + 1).padStart(2, "0")}
+                </span>
               </button>
             )}
             <button
+              aria-current={view === "usage" ? "page" : undefined}
               className={`toolTab ${view === "usage" ? "selected" : ""}`}
               onClick={() => setView("usage")}
             >
@@ -652,8 +662,12 @@ export function App() {
                 <strong>Usage</strong>
                 <small>Token &amp; cost</small>
               </span>
+              <span className="sidebarNavIndex" aria-hidden>
+                {String(snapshot.tools.length + (isWindowsCodexOnly ? 1 : 2)).padStart(2, "0")}
+              </span>
             </button>
             <button
+              aria-current={view === "settings" ? "page" : undefined}
               className={`toolTab ${view === "settings" ? "selected" : ""}`}
               onClick={() => setView("settings")}
             >
@@ -663,6 +677,9 @@ export function App() {
               <span className="sidebarNavCopy">
                 <strong>Settings</strong>
                 <small>CLI paths</small>
+              </span>
+              <span className="sidebarNavIndex" aria-hidden>
+                {String(snapshot.tools.length + (isWindowsCodexOnly ? 2 : 3)).padStart(2, "0")}
               </span>
             </button>
           </div>
