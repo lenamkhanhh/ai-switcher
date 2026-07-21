@@ -805,17 +805,25 @@ impl ManagedState {
         };
         // Mutex released — HTTP calls run in parallel without blocking other operations.
 
-        // Phase 2: fetch all quotas in parallel (no mutex held).
-        let results: Vec<(String, QuotaInfo)> = {
-            let handles: Vec<_> = accounts_info
-                .into_iter()
+        // Phase 2: fetch quotas without flooding the provider. A full refresh used to launch one
+        // HTTP request per account at once, which made otherwise healthy accounts intermittently
+        // hit the 20-second network timeout. Keep a small amount of parallelism and retry only
+        // transient transport failures; authentication and quota HTTP responses are never retried.
+        let mut results: Vec<(String, QuotaInfo)> = Vec::with_capacity(accounts_info.len());
+        for range in quota_refresh_batch_ranges(accounts_info.len()) {
+            let handles: Vec<_> = accounts_info[range]
+                .iter()
+                .cloned()
                 .map(|(account_id, config_dir)| {
                     let tid = tool_id.clone();
-                    std::thread::spawn(move || (account_id, read_quota(&tid, &config_dir)))
+                    std::thread::spawn(move || {
+                        let quota = read_quota_resilient(&tid, &config_dir);
+                        (account_id, quota)
+                    })
                 })
                 .collect();
-            handles.into_iter().filter_map(|h| h.join().ok()).collect()
-        };
+            results.extend(handles.into_iter().filter_map(|handle| handle.join().ok()));
+        }
 
         // Phase 3: write all quotas back — brief lock.
         let exhausted_accounts: Vec<Account> = {
@@ -905,7 +913,7 @@ impl ManagedState {
         };
 
         // Phase 2: HTTP call — no mutex held.
-        let quota = read_quota(tool_id, &config_dir);
+        let quota = read_quota_resilient(tool_id, &config_dir);
         let requires_reauth = quota_requires_reauth(tool_id, &quota);
 
         // Phase 3: write back — brief lock.
@@ -3767,6 +3775,49 @@ fn quota_requires_reauth(tool_id: &ToolId, quota: &QuotaInfo) -> bool {
         || lower.contains("access_token")
 }
 
+const QUOTA_REFRESH_CONCURRENCY: usize = 3;
+const QUOTA_READ_MAX_ATTEMPTS: usize = 2;
+
+fn quota_refresh_batch_ranges(total: usize) -> Vec<std::ops::Range<usize>> {
+    (0..total)
+        .step_by(QUOTA_REFRESH_CONCURRENCY)
+        .map(|start| start..(start + QUOTA_REFRESH_CONCURRENCY).min(total))
+        .collect()
+}
+
+fn quota_error_is_transient(quota: &QuotaInfo) -> bool {
+    let Some(error) = quota.error.as_deref() else {
+        return false;
+    };
+    let lower = error.to_ascii_lowercase();
+    lower.contains("network error")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("dns error")
+}
+
+fn retry_quota_read<Read, Wait>(mut read: Read, mut wait: Wait) -> QuotaInfo
+where
+    Read: FnMut() -> QuotaInfo,
+    Wait: FnMut(std::time::Duration),
+{
+    let mut quota = read();
+    for attempt in 1..QUOTA_READ_MAX_ATTEMPTS {
+        if !quota_error_is_transient(&quota) {
+            break;
+        }
+        wait(std::time::Duration::from_millis(750 * attempt as u64));
+        quota = read();
+    }
+    quota
+}
+
+fn read_quota_resilient(tool_id: &ToolId, config_dir: &std::path::Path) -> QuotaInfo {
+    retry_quota_read(|| read_quota(tool_id, config_dir), std::thread::sleep)
+}
+
 /// The best replacement account: same tool, not `excluded`, not yet at the threshold,
 /// logged in (Idle/Active), with the most quota left. The Default account is eligible.
 fn best_replacement<'a>(
@@ -4245,7 +4296,10 @@ mod tests {
 
     #[test]
     fn quota_refresh_batches_limit_parallel_requests() {
-        assert_eq!(quota_refresh_batch_ranges(0), Vec::<std::ops::Range<usize>>::new());
+        assert_eq!(
+            quota_refresh_batch_ranges(0),
+            Vec::<std::ops::Range<usize>>::new()
+        );
         assert_eq!(quota_refresh_batch_ranges(7), vec![0..3, 3..6, 6..7]);
     }
 
