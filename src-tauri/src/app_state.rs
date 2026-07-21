@@ -44,6 +44,7 @@ impl ManagedState {
         let store = Store::new()?;
         let mut data = store.load()?;
         migrate_defaults(&mut data.accounts);
+        migrate_codex_reauth_states(&mut data.accounts);
         migrate_auto_switch_settings(&mut data);
         retire_auto_ping_settings(&mut data);
         autodetect_missing_tool_setups(&store, &mut data);
@@ -3396,6 +3397,24 @@ fn migrate_defaults(accounts: &mut Vec<Account>) {
     }
 }
 
+/// Older releases could persist a Codex quota HTTP 401 while leaving the account in Idle/Active.
+/// Heal that mismatch during startup so the installed app immediately offers Re-login without
+/// requiring another network refresh. Machine-default and API/proxy accounts use different auth
+/// ownership, so they intentionally remain unchanged.
+fn migrate_codex_reauth_states(accounts: &mut [Account]) {
+    for account in accounts.iter_mut().filter(|account| {
+        account.tool_id == ToolId::Codex
+            && !account.is_default
+            && account.api_provider.is_none()
+            && account
+                .quota
+                .as_ref()
+                .is_some_and(|quota| quota_requires_reauth(&ToolId::Codex, quota))
+    }) {
+        account.state = AccountState::NeedsLogin;
+    }
+}
+
 fn migrate_auto_switch_settings(data: &mut StoredState) {
     let legacy = default_auto_switch_setting_from_legacy(data);
     for tool_id in [ToolId::Claude, ToolId::Codex] {
@@ -4176,7 +4195,33 @@ mod tests {
         assert!(quota_requires_reauth(&ToolId::Codex, &quota));
         quota.error = None;
         assert!(!quota_requires_reauth(&ToolId::Codex, &quota));
-        assert!(!quota_requires_reauth(&ToolId::Claude, &QuotaInfo::with_message("HTTP 401")));
+        assert!(!quota_requires_reauth(
+            &ToolId::Claude,
+            &QuotaInfo::with_message("HTTP 401")
+        ));
+    }
+
+    #[test]
+    fn startup_migration_marks_stale_codex_401_as_needs_login() {
+        let mut account = test_account("acc-1", AccountState::Idle, 10.0);
+        account.quota = Some(QuotaInfo::with_message("Couldn't read quota: HTTP 401"));
+        let mut accounts = vec![account];
+
+        migrate_codex_reauth_states(&mut accounts);
+
+        assert_eq!(accounts[0].state, AccountState::NeedsLogin);
+    }
+
+    #[test]
+    fn startup_migration_does_not_take_over_machine_default_auth() {
+        let mut account = test_account("default-codex", AccountState::Idle, 10.0);
+        account.is_default = true;
+        account.quota = Some(QuotaInfo::with_message("Couldn't read quota: HTTP 401"));
+        let mut accounts = vec![account];
+
+        migrate_codex_reauth_states(&mut accounts);
+
+        assert_eq!(accounts[0].state, AccountState::Idle);
     }
 
     #[test]
