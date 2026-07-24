@@ -3000,3 +3000,377 @@ button.danger:hover:not(:disabled) {
 .autoStatsTable th:first-child {
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------- 2026-07-24 Tokyo luxury board theme ---------- */
+:root {
+  --bg-window: #070809;
+  --bg-sidebar: rgba(18, 10, 10, 0.62);
+  --surface: #0f1012;
+  --surface-2: #15171b;
+  --surface-hover: #1b1d22;
+  --line: rgba(197, 160, 104, 0.12);
+  --line-strong: rgba(221, 188, 131, 0.22);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.54), 0 16px 36px rgba(0, 0, 0, 0.3);
+  --shadow-pop: 0 24px 64px rgba(0, 0, 0, 0.68), 0 4px 18px rgba(0, 0, 0, 0.52);
+  background:
+    radial-gradient(1200px 760px at 84% -8%, rgba(92, 18, 21, 0.18), transparent 58%),
+    radial-gradient(980px 540px at 18% -12%, rgba(141, 103, 48, 0.1), transparent 52%),
+    #070809;
+}
+
+.topbar {
+  background: rgba(9, 10, 12, 0.96);
+  border-bottom-color: rgba(205, 166, 108, 0.08);
+}
+
+.workspace {
+  gap: 10px;
+  grid-template-columns: 292px minmax(0, 1fr);
+}
+
+.sidebar {
+  background:
+    linear-gradient(180deg, rgba(7, 8, 10, 0.08), rgba(7, 8, 10, 0.38)),
+    url("./assets/sidebar-yoru-lane.png");
+  background-position: center top, left center;
+  background-size: cover, cover;
+  border: 1px solid rgba(189, 151, 93, 0.14);
+  border-radius: 26px;
+  box-shadow: inset 0 1px 0 rgba(255, 232, 192, 0.05), 0 24px 60px rgba(0, 0, 0, 0.34);
+}
+
+.sidebar::before {
+  background:
+    linear-gradient(180deg, rgba(6, 7, 9, 0.2) 0%, rgba(6, 7, 9, 0.4) 22%, rgba(6, 7, 9, 0.62) 52%, rgba(6, 7, 9, 0.78) 100%),
+    linear-gradient(90deg, rgba(6, 7, 9, 0.05) 0%, rgba(6, 7, 9, 0.24) 48%, rgba(6, 7, 9, 0.84) 100%);
+  z-index: 0;
+}
+
+.sidebar::after {
+  background:
+    radial-gradient(circle at 18% 26%, rgba(130, 19, 18, 0.14), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(177, 135, 73, 0.06), transparent 18%);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+
+.sidebarBrand {
+  align-items: center;
+  gap: 14px;
+  min-height: 148px;
+  padding: 28px 24px 24px;
+  z-index: 2;
+}
+
+.sidebarBrandMark {
+  background: rgba(10, 10, 12, 0.34);
+  border: 1px solid rgba(199, 158, 99, 0.18);
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 236, 202, 0.06);
+  height: 58px;
+  width: 58px;
+}
+
+.sidebarBrandMark img {
+  filter: sepia(0.42) saturate(1.1) brightness(1.02);
+  height: 50px;
+  opacity: 0.96;
+  width: 50px;
+}
+
+.sidebarBrand > strong {
+  color: #e0bf84;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.26em;
+}
+
+.sidebarBrandRule {
+  background: linear-gradient(90deg, rgba(224, 191, 132, 0.72), rgba(224, 191, 132, 0));
+  height: 1px;
+  margin-top: 2px;
+  width: 72px;
+}
+
+.sidebarNav {
+  gap: 10px;
+  padding: 8px 18px 0;
+  z-index: 2;
+}
+
+.toolTab {
+  background: rgba(10, 10, 12, 0.16);
+  border: 1px solid transparent;
+  border-radius: 20px;
+  gap: 14px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  min-height: 84px;
+  overflow: hidden;
+  padding: 14px 16px;
+}
+
+.toolTab:hover:not(.selected) {
+  background: rgba(14, 14, 16, 0.3);
+  border-color: rgba(184, 148, 98, 0.1);
+}
+
+.sidebarNavIcon {
+  background: rgba(10, 10, 12, 0.28);
+  border: 1px solid rgba(192, 154, 97, 0.18);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 232, 188, 0.05);
+  color: #e2bf7b;
+  height: 40px;
+  width: 40px;
+}
+
+.sidebarNavIcon svg {
+  height: 20px;
+  stroke-width: 1.7;
+  width: 20px;
+}
+
+.sidebarNavCopy {
+  gap: 6px;
+}
+
+.sidebarNavCopy strong {
+  color: #ebddbf;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.sidebarNavCopy small {
+  color: #b89b72;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sidebarNavIndex {
+  align-items: center;
+  align-self: center;
+  background: rgba(14, 12, 12, 0.28);
+  border: 1px solid rgba(170, 129, 78, 0.2);
+  border-radius: 999px;
+  color: #d5aa69;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  justify-content: center;
+  min-height: 36px;
+  min-width: 36px;
+  padding: 0 10px;
+}
+
+.sidebar .toolTab.selected,
+.sidebar .toolTab.selected:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(63, 20, 19, 0.7), rgba(21, 12, 13, 0.66));
+  border-color: rgba(184, 79, 66, 0.54);
+  box-shadow: inset 0 1px 0 rgba(255, 219, 164, 0.08), 0 0 24px rgba(93, 21, 21, 0.16);
+}
+
+.toolTab.selected .sidebarNavIcon {
+  background: rgba(24, 15, 16, 0.78);
+  border-color: rgba(228, 187, 116, 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 236, 202, 0.08), 0 0 12px rgba(128, 25, 23, 0.18);
+  color: #f2d59c;
+}
+
+.toolTab.selected .sidebarNavCopy strong {
+  color: #fff3d8;
+}
+
+.toolTab.selected .sidebarNavCopy small {
+  color: #d7b180;
+}
+
+.toolTab.selected .sidebarNavCopy::after {
+  background: linear-gradient(90deg, rgba(224, 191, 132, 0.96), rgba(224, 191, 132, 0));
+  height: 1px;
+  margin-top: 7px;
+  width: 78px;
+}
+
+.toolTab.selected .sidebarNavIndex {
+  background: rgba(71, 18, 18, 0.72);
+  border-color: rgba(210, 88, 72, 0.58);
+  box-shadow: 0 0 18px rgba(122, 23, 20, 0.24);
+  color: #ffd08a;
+}
+
+.toolTab.selected .sidebarNavIndex::after {
+  content: none;
+}
+
+.sidebarPoem {
+  bottom: 104px;
+  color: rgba(199, 149, 95, 0.68);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  left: 24px;
+  pointer-events: none;
+  position: absolute;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.35);
+  z-index: 2;
+}
+
+.sidebarPoem span {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 15px;
+  letter-spacing: 0.05em;
+}
+
+.sidebarPoem .sidebarSeal {
+  align-items: center;
+  background: rgba(92, 21, 20, 0.72);
+  border: 1px solid rgba(216, 95, 80, 0.6);
+  border-radius: 999px;
+  color: #f2bc7b;
+  display: inline-flex;
+  font-size: 18px;
+  height: 42px;
+  justify-content: center;
+  margin-top: 8px;
+  width: 42px;
+}
+
+.sidebarFoot {
+  border-top: 1px solid rgba(224, 191, 132, 0.12);
+  justify-content: flex-start;
+  margin: 0 22px;
+  padding: 14px 0 18px;
+}
+
+.sidebarNote {
+  align-items: center;
+  color: #e0bf84;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 10px;
+  letter-spacing: 0.02em;
+}
+
+.sidebarNoteIcon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.sidebarNoteDot {
+  color: #b94b43;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.panel {
+  background: linear-gradient(180deg, rgba(13, 15, 18, 0.96), rgba(10, 11, 13, 0.95));
+  border: 1px solid rgba(203, 163, 102, 0.1);
+  border-radius: 26px;
+  box-shadow: inset 0 1px 0 rgba(255, 229, 189, 0.04), 0 24px 60px rgba(0, 0, 0, 0.26);
+  padding: 24px;
+}
+
+.titleRow h2 {
+  color: #f2e3c0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.headerCta {
+  min-height: 42px;
+  padding: 0 18px;
+}
+
+.headerCtaPrimary {
+  background: linear-gradient(180deg, rgba(92, 22, 24, 0.95), rgba(54, 16, 18, 0.95));
+  border-color: rgba(181, 77, 66, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 224, 172, 0.06), 0 10px 24px rgba(53, 10, 12, 0.26);
+  color: #f6e1c1;
+}
+
+.headerCtaPrimary:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(106, 26, 29, 0.98), rgba(66, 18, 21, 0.98));
+  border-color: rgba(199, 92, 79, 0.64);
+}
+
+.headerCtaQuiet {
+  background: rgba(17, 18, 21, 0.78);
+  border-color: rgba(204, 167, 110, 0.22);
+  color: #e7cf9d;
+}
+
+.headerCtaQuiet:hover:not(:disabled) {
+  background: rgba(21, 22, 25, 0.9);
+  border-color: rgba(221, 188, 131, 0.34);
+}
+
+.drift {
+  background: linear-gradient(180deg, rgba(24, 17, 13, 0.8), rgba(19, 14, 11, 0.8));
+  border: 1px solid rgba(186, 144, 86, 0.18);
+}
+
+.account {
+  background: linear-gradient(180deg, rgba(15, 16, 18, 0.98), rgba(12, 13, 15, 0.96));
+  border-color: rgba(200, 158, 100, 0.1);
+  border-radius: 20px;
+}
+
+.account:hover {
+  border-color: rgba(218, 177, 118, 0.18);
+}
+
+.cmdChip {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(204, 167, 110, 0.14);
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    gap: 12px;
+    grid-template-columns: 224px minmax(0, 1fr);
+  }
+
+  .sidebarBrand {
+    padding: 24px 18px 20px;
+  }
+
+  .sidebarNav {
+    padding: 8px 12px 0;
+  }
+
+  .toolTab {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    min-height: 76px;
+    padding: 12px;
+  }
+
+  .sidebarNavIcon {
+    height: 34px;
+    width: 34px;
+  }
+
+  .sidebarNavCopy strong {
+    font-size: 16px;
+  }
+
+  .sidebarNavCopy small {
+    font-size: 12px;
+  }
+
+  .sidebarNavIndex {
+    min-height: 32px;
+    min-width: 32px;
+  }
+
+  .sidebarPoem {
+    bottom: 96px;
+    left: 18px;
+  }
+}

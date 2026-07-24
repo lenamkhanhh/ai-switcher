@@ -685,20 +685,25 @@ export function App() {
             </button>
           </div>
 
-          <div className="sidebarEtching" aria-hidden>
-            <img src={logoUrl} alt="" />
+          <div className="sidebarPoem" aria-hidden>
+            <span>{"\u672A"}</span>
+            <span>{"\u6765"}</span>
+            <span>{"\u3092"}</span>
+            <span>{"\u5275"}</span>
+            <span>{"\u308B"}</span>
+            <span className="sidebarSeal">{"\u4F8D"}</span>
           </div>
 
           <div className="sidebarFoot">
-            <button
-              className="sidebarCredit"
-              onClick={() => void openUrl("https://hoangphan.blog/").catch(() => {})}
-              title="https://hoangphan.blog/"
-            >
+            <div className="sidebarNote">
+              <span className="sidebarNoteIcon" aria-hidden>
+                {"\u273F"}
+              </span>
               {version && <span>v{version}</span>}
-              {version && <i aria-hidden>·</i>}
-              <span>Hoàng Phan</span>
-            </button>
+              <span className="sidebarNoteDot" aria-hidden>
+                {"\u2022"}
+              </span>
+            </div>
           </div>
         </aside>
 
@@ -817,6 +822,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  className="headerCta headerCtaPrimary"
                   onClick={() => setDialog("add")}
                   disabled={!currentTool.installed || busy !== null}
                 >
@@ -824,6 +830,7 @@ export function App() {
                   {currentTool.id === "antigravity" ? "Save current account" : "Add account"}
                 </button>
                 <button
+                  className="headerCta headerCtaQuiet"
                   onClick={refresh}
                   disabled={busy !== null || refreshingAccounts.size > 0}
                 >
