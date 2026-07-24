@@ -1,4 +1,5 @@
 export type ToolId = "claude" | "codex" | "antigravity";
+export type CodexLoginMethod = "deviceCode" | "browserProfile";
 export type UsageToolId = ToolId | "all";
 
 export type AccountState = "idle" | "active" | "exhausted" | "needs-login";
@@ -51,6 +52,8 @@ export interface Account {
   /** Present when the account runs through an external API/proxy gateway (no quota). */
   apiProvider?: ApiProvider | null;
   quotaStatus?: string | null;
+  /** Saved for Codex accounts and reused by Re-login. */
+  codexLoginMethod: CodexLoginMethod;
 }
 
 export interface ToolStatus {
@@ -278,6 +281,8 @@ export interface AddAccountInput {
   mode: "import" | "login";
   /** Custom command name (required for Claude/Codex). */
   launcher?: string;
+  /** Codex-only. Omitted values retain the device-code flow. */
+  codexLoginMethod?: CodexLoginMethod;
 }
 
 export interface AddApiAccountInput {

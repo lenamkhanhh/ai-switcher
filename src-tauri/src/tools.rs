@@ -1,4 +1,4 @@
-use crate::models::{StartupIntegrationMode, ToolId};
+use crate::models::{CodexLoginMethod, StartupIntegrationMode, ToolId};
 use crate::store::Store;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -577,17 +577,17 @@ fn chrome_binary_path() -> Option<PathBuf> {
         .or_else(|| command_path("chrome"))
 }
 
-fn isolated_codex_login_chrome_args(user_data_dir: &Path) -> Vec<String> {
+fn isolated_codex_login_chrome_args(user_data_dir: &Path, url: &str) -> Vec<String> {
     vec![
         format!("--user-data-dir={}", user_data_dir.to_string_lossy()),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--new-window".into(),
-        codex_device_auth_url().into(),
+        url.into(),
     ]
 }
 
-fn open_codex_device_auth_in_isolated_profile(store: &Store, account_id: &str) -> bool {
+fn open_codex_in_isolated_browser_profile(store: &Store, account_id: &str, url: &str) -> bool {
     if !cfg!(windows) {
         return false;
     }
@@ -601,9 +601,27 @@ fn open_codex_device_auth_in_isolated_profile(store: &Store, account_id: &str) -
         return false;
     }
     Command::new(chrome)
-        .args(isolated_codex_login_chrome_args(&browser_profile))
+        .args(isolated_codex_login_chrome_args(&browser_profile, url))
         .spawn()
         .is_ok()
+}
+
+fn open_codex_device_auth_in_isolated_profile(store: &Store, account_id: &str) -> bool {
+    open_codex_in_isolated_browser_profile(store, account_id, codex_device_auth_url())
+}
+
+/// Standard browser OAuth is controlled by the Codex CLI. This opens the
+/// persistent per-account Chrome profile first without changing OS browser
+/// associations or handling the OAuth callback ourselves.
+fn open_codex_browser_login_profile(store: &Store, account_id: &str) -> bool {
+    open_codex_in_isolated_browser_profile(store, account_id, "https://chatgpt.com/")
+}
+
+fn codex_login_args(method: CodexLoginMethod) -> Vec<&'static str> {
+    match method {
+        CodexLoginMethod::DeviceCode => vec!["login", "--device-auth"],
+        CodexLoginMethod::BrowserProfile => vec!["login"],
+    }
 }
 
 fn codex_reauth_marker(profile: &Path) -> PathBuf {
@@ -1164,6 +1182,7 @@ pub fn launch_profile_login(
     default_config_dir: &Path,
     binary_path: &Path,
     app: Option<AppHandle>,
+    codex_login_method: CodexLoginMethod,
 ) -> Result<()> {
     let profile = create_profile_with_default(tool_id, store, account_id, default_config_dir)?;
     link_shared_config_to(tool_id, &profile, default_config_dir);
@@ -1181,8 +1200,15 @@ pub fn launch_profile_login(
             app,
         ),
         ToolId::Codex => {
-            let _ = open_codex_device_auth_in_isolated_profile(store, account_id);
-            let args = vec!["login", "--device-auth"];
+            match codex_login_method {
+                CodexLoginMethod::DeviceCode => {
+                    let _ = open_codex_device_auth_in_isolated_profile(store, account_id);
+                }
+                CodexLoginMethod::BrowserProfile => {
+                    let _ = open_codex_browser_login_profile(store, account_id);
+                }
+            }
+            let args = codex_login_args(codex_login_method);
             run_profile_login_command(
                 binary_path,
                 "CODEX_HOME",
@@ -1826,13 +1852,28 @@ mod tests {
 
     #[test]
     fn codex_login_uses_an_isolated_chrome_user_data_dir() {
-        let args = isolated_codex_login_chrome_args(Path::new("C:/isolated/acc8"));
+        let args = isolated_codex_login_chrome_args(
+            Path::new("C:/isolated/acc8"),
+            codex_device_auth_url(),
+        );
         assert!(args
             .iter()
             .any(|arg| arg == "--user-data-dir=C:/isolated/acc8"));
         assert!(args.iter().any(|arg| arg == "--new-window"));
         assert!(args.iter().any(|arg| arg == codex_device_auth_url()));
         assert!(!args.iter().any(|arg| arg == "--profile-directory"));
+    }
+
+    #[test]
+    fn browser_profile_login_uses_standard_browser_oauth_not_device_code() {
+        assert_eq!(
+            codex_login_args(CodexLoginMethod::DeviceCode),
+            ["login", "--device-auth"]
+        );
+        assert_eq!(
+            codex_login_args(CodexLoginMethod::BrowserProfile),
+            ["login"]
+        );
     }
 
     #[test]

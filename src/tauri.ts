@@ -91,19 +91,19 @@ const demoSnapshot: AppSnapshot = {
         {
           id: "default-claude", toolId: "claude", name: "Machine default", state: "idle",
           fingerprint: "default", createdAt: "2026-05-20T10:00:00Z", updatedAt: "2026-05-31T08:00:00Z",
-          lastUsedAt: null, quota: quota(32, 18), launcherCommand: null, launcherPaths: null, quotaStatus: "ready", isDefault: true,
+          lastUsedAt: null, quota: quota(32, 18), launcherCommand: null, launcherPaths: null, quotaStatus: "ready", isDefault: true, codexLoginMethod: "deviceCode",
         },
         {
           id: "c2", toolId: "claude", name: "Work", state: "active", fingerprint: "profile:c2",
           createdAt: "2026-05-21T10:00:00Z", updatedAt: "2026-05-30T08:00:00Z",
           lastUsedAt: "2026-05-29T19:10:00Z", quota: quota(82, 70),
-          launcherCommand: "claude-work", launcherPaths: ["/Users/demo/.local/bin/claude-work"], quotaStatus: "ready", isDefault: false,
+          launcherCommand: "claude-work", launcherPaths: ["/Users/demo/.local/bin/claude-work"], quotaStatus: "ready", isDefault: false, codexLoginMethod: "deviceCode",
         },
         {
           id: "c3", toolId: "claude", name: "Client", state: "exhausted", fingerprint: "profile:c3",
           createdAt: "2026-05-22T10:00:00Z", updatedAt: "2026-05-31T06:00:00Z",
           lastUsedAt: "2026-05-31T05:00:00Z", quota: quota(100, 96),
-          launcherCommand: "claude-client", launcherPaths: ["/Users/demo/.local/bin/claude-client"], quotaStatus: "ready", isDefault: false,
+          launcherCommand: "claude-client", launcherPaths: ["/Users/demo/.local/bin/claude-client"], quotaStatus: "ready", isDefault: false, codexLoginMethod: "deviceCode",
         },
       ],
     },
@@ -117,13 +117,13 @@ const demoSnapshot: AppSnapshot = {
         {
           id: "default-codex", toolId: "codex", name: "Machine default", state: "idle",
           fingerprint: "default", createdAt: "2026-05-18T10:00:00Z", updatedAt: "2026-05-31T08:00:00Z",
-          lastUsedAt: null, quota: quota(40, 55), launcherCommand: null, launcherPaths: null, quotaStatus: "ready", isDefault: true,
+          lastUsedAt: null, quota: quota(40, 55), launcherCommand: null, launcherPaths: null, quotaStatus: "ready", isDefault: true, codexLoginMethod: "deviceCode",
         },
         {
           id: "x2", toolId: "codex", name: "Pro 6x", state: "needs-login", fingerprint: "profile:x2",
           createdAt: "2026-05-19T10:00:00Z", updatedAt: "2026-05-31T08:00:00Z",
           lastUsedAt: null, quota: quota(null, null, "Waiting for login in Terminal"),
-          launcherCommand: "codex-pro6", launcherPaths: ["/opt/homebrew/bin/codex-pro6"], quotaStatus: "error", isDefault: false,
+          launcherCommand: "codex-pro6", launcherPaths: ["/opt/homebrew/bin/codex-pro6"], quotaStatus: "error", isDefault: false, codexLoginMethod: "browserProfile",
         },
       ],
     },
@@ -396,6 +396,7 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
         quota: null,
         launcherCommand: null,
         isDefault: false,
+        codexLoginMethod: "deviceCode",
         apiProvider: {
           baseUrl: demoSnapshot.apiGateway.status.baseUrl,
           model:

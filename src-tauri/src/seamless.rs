@@ -191,6 +191,7 @@ mod tests {
             account_email: None,
             api_provider: None,
             quota_status: None,
+            codex_login_method: crate::models::CodexLoginMethod::DeviceCode,
             quota: Some(crate::models::QuotaInfo {
                 five_hour: crate::models::QuotaWindow {
                     label: "5-hour".into(),

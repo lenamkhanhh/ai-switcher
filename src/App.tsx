@@ -47,6 +47,7 @@ import type {
   ApiUsageReport,
   AppSnapshot,
   BinaryCandidate,
+  CodexLoginMethod,
   ConfigCandidate,
   CreateApiGatewayKeyInput,
   DetectionReport,
@@ -883,7 +884,7 @@ export function App() {
                         `reauth-${account.id}`,
                         () => api.reauthenticateAccount(currentTool.id, account.id),
                         undefined,
-                        "A separate sign-in window was opened. Approve the Codex device code; quota will refresh automatically.",
+                        "A separate sign-in window was opened. Complete the Codex sign-in; quota will refresh automatically.",
                       )
                     }
                   />
@@ -2273,6 +2274,8 @@ function AddDialog({
       : "--dangerously-bypass-approvals-and-sandbox";
   const [kind, setKind] = useState<"login" | "api">("login");
   const isApi = canApi && kind === "api";
+  const [codexLoginMethod, setCodexLoginMethod] =
+    useState<CodexLoginMethod>("deviceCode");
 
   const [name, setName] = useState("");
   const [launcher, setLauncher] = useState("");
@@ -2322,6 +2325,7 @@ function AddDialog({
       name: name.trim(),
       mode: isCli ? "login" : "import",
       launcher: isCli ? launcher.trim() : undefined,
+      codexLoginMethod: tool.id === "codex" ? codexLoginMethod : undefined,
     });
   };
 
@@ -2385,22 +2389,50 @@ function AddDialog({
         </label>
 
         {isCli && !isApi && (
-          <label>
-            <span className="labelRow">
-              Custom command (required)
-              <span
-                className="helpDot"
-                title={`Open a terminal and run this command to use the account separately, in parallel. Forces the ${tool.id}- prefix, only a-z 0-9 - _`}
-              >
-                <CircleHelp />
+          <>
+            {tool.id === "codex" && (
+              <fieldset className="codexLoginMethod">
+                <legend>Sign-in method</legend>
+                <div className="kindToggle">
+                  <button
+                    type="button"
+                    className={codexLoginMethod === "deviceCode" ? "active" : ""}
+                    onClick={() => setCodexLoginMethod("deviceCode")}
+                  >
+                    Device code
+                  </button>
+                  <button
+                    type="button"
+                    className={codexLoginMethod === "browserProfile" ? "active" : ""}
+                    onClick={() => setCodexLoginMethod("browserProfile")}
+                  >
+                    Chrome profile (EDU)
+                  </button>
+                </div>
+                <small>
+                  {codexLoginMethod === "deviceCode"
+                    ? "Current flow: enter a one-time code. Use this for personal accounts that allow device authentication."
+                    : "Opens a separate Chrome profile, then starts standard browser sign-in. Use this for EDU/workspace accounts that block device codes."}
+                </small>
+              </fieldset>
+            )}
+            <label>
+              <span className="labelRow">
+                Custom command (required)
+                <span
+                  className="helpDot"
+                  title={`Open a terminal and run this command to use the account separately, in parallel. Forces the ${tool.id}- prefix, only a-z 0-9 - _`}
+                >
+                  <CircleHelp />
+                </span>
               </span>
-            </span>
-            <input
-              value={launcher}
-              onChange={(event) => setLauncher(event.target.value)}
-              placeholder={`${tool.id}-work`}
-            />
-          </label>
+              <input
+                value={launcher}
+                onChange={(event) => setLauncher(event.target.value)}
+                placeholder={`${tool.id}-work`}
+              />
+            </label>
+          </>
         )}
 
         {isApi && (

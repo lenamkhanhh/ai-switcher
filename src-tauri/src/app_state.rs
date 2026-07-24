@@ -1,7 +1,7 @@
 use crate::models::{
     Account, AccountState, AddAccountInput, AddApiAccountInput, ApiGatewayAccount, ApiGatewayCombo,
     ApiGatewayConfig, ApiGatewayKey, ApiGatewayServerState, ApiGatewaySnapshot, ApiProvider,
-    ApiUsageReport, AppSnapshot, AutoSwitchSetting, CreateApiGatewayKeyInput,
+    ApiUsageReport, AppSnapshot, AutoSwitchSetting, CodexLoginMethod, CreateApiGatewayKeyInput,
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
     DeleteApiGatewayKeyInput, DetectionReport, QuotaInfo, RenameAccountInput,
     SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
@@ -405,6 +405,7 @@ impl ManagedState {
                     }),
                     launcher_paths: None,
                     quota_status: None,
+                    codex_login_method: CodexLoginMethod::DeviceCode,
                 });
             } else if let Some(account) = data
                 .accounts
@@ -2660,7 +2661,7 @@ impl ManagedState {
         if tool_id != ToolId::Codex {
             anyhow::bail!("Re-login is currently available for Codex accounts only");
         }
-        let (default_dir, binary, profile) = {
+        let (default_dir, binary, profile, codex_login_method) = {
             let data = self
                 .data
                 .lock()
@@ -2681,6 +2682,7 @@ impl ManagedState {
                     account,
                     &resolved_default_config_dir(&data, &tool_id),
                 ),
+                account.codex_login_method,
             )
         };
         crate::tools::mark_codex_reauth_pending(&profile)?;
@@ -2695,9 +2697,14 @@ impl ManagedState {
                 .find(|a| a.tool_id == tool_id && a.id == account_id)
             {
                 account.state = AccountState::NeedsLogin;
-                account.quota = Some(QuotaInfo::with_message(
-                    "Codex sign-in expired — approve the new device code",
-                ));
+                account.quota = Some(QuotaInfo::with_message(match codex_login_method {
+                    CodexLoginMethod::DeviceCode => {
+                        "Codex sign-in expired — approve the new device code"
+                    }
+                    CodexLoginMethod::BrowserProfile => {
+                        "Codex sign-in expired — complete the browser sign-in"
+                    }
+                }));
                 account.updated_at = now();
             }
             self.store.save(&data)?;
@@ -2709,6 +2716,7 @@ impl ManagedState {
             &default_dir,
             &binary,
             Some(app.clone()),
+            codex_login_method,
         )?;
         spawn_login_watch(app.clone(), tool_id, account_id.to_string());
         self.snapshot()
@@ -2793,6 +2801,7 @@ impl ManagedState {
                 api_provider: None,
                 launcher_paths: None,
                 quota_status: None,
+                codex_login_method: CodexLoginMethod::DeviceCode,
             });
             self.store.save(&data)?;
         }
@@ -2838,6 +2847,7 @@ impl ManagedState {
             &default_dir,
             &binary_path,
             Some(app.clone()),
+            input.codex_login_method,
         )
         .context("Login not completed, account not added")?;
         write_launcher(
@@ -2874,6 +2884,7 @@ impl ManagedState {
                 api_provider: None,
                 launcher_paths: None,
                 quota_status: None,
+                codex_login_method: input.codex_login_method,
             });
             self.store.save(&data)?;
         }
@@ -2990,6 +3001,7 @@ impl ManagedState {
                 }),
                 launcher_paths: None,
                 quota_status: None,
+                codex_login_method: CodexLoginMethod::DeviceCode,
             });
             self.store.save(&data)?;
         }
@@ -3403,6 +3415,7 @@ fn migrate_defaults(accounts: &mut Vec<Account>) {
             api_provider: None,
             launcher_paths: None,
             quota_status: None,
+            codex_login_method: CodexLoginMethod::DeviceCode,
         });
     }
 }
@@ -4488,6 +4501,7 @@ mod tests {
             account_email: None,
             api_provider: None,
             quota_status: None,
+            codex_login_method: CodexLoginMethod::DeviceCode,
         }
     }
 

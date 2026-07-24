@@ -2648,6 +2648,27 @@ button.danger:hover:not(:disabled) {
   box-shadow: var(--shadow-card);
 }
 
+.codexLoginMethod {
+  border: 0;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.codexLoginMethod legend {
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0;
+}
+
+.codexLoginMethod small {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 /* Keep a tall Add-API form usable */
 .modal {
   max-height: calc(100vh - 64px);

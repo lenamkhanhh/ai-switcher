@@ -2687,6 +2687,7 @@ mod tests {
             api_provider: None,
             launcher_paths: None,
             quota_status: None,
+            codex_login_method: crate::models::CodexLoginMethod::DeviceCode,
         }
     }
 

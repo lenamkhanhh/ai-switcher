@@ -9,6 +9,17 @@ pub enum ToolId {
     Antigravity,
 }
 
+/// Codex offers two supported sign-in paths. Device code stays the default
+/// for existing accounts; browser OAuth supports managed workspaces that
+/// disable device-code authentication.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexLoginMethod {
+    #[default]
+    DeviceCode,
+    BrowserProfile,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum StartupIntegrationMode {
@@ -408,6 +419,9 @@ pub struct Account {
     pub api_provider: Option<ApiProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_status: Option<String>,
+    /// Saved for Codex accounts so Re-login uses the same authorization path.
+    #[serde(default)]
+    pub codex_login_method: CodexLoginMethod,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -781,6 +795,9 @@ pub struct AddAccountInput {
     /// Custom command name (e.g. `claude-work`) — required for Claude/Codex (Login mode).
     #[serde(default)]
     pub launcher: Option<String>,
+    /// Codex-only. Omitted values retain the historical device-code flow.
+    #[serde(default)]
+    pub codex_login_method: CodexLoginMethod,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
