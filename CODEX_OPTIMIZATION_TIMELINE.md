@@ -688,3 +688,8 @@ Sau thay đổi hoặc rollback: mở thread mới/restart Codex và ghi sự ki
 ### 2026-07-25 - Corrected rollback application packaging
 - Root cause of the failed launch: the rollback pass copied an executable produced by direct `cargo build --release`, which behaved as a development build and attempted the configured `http://127.0.0.1:5173` frontend. It must not be used as the installed Tauri executable.
 - Rebuilt through `npm.cmd run tauri build`; production Vite build plus MSI and NSIS bundles completed successfully. The post-bundle release executable was copied to the installed location. Release and installed SHA-256 match; the relaunched app was alive and `Responding = True` with a nonzero main-window handle. No newly launched Chrome process targeted the dev URL.
+### 2026-07-25 - Japanese noir unified shell implementation
+- Added the approved unified-shell UI treatment: sidebar and content now share one bounded surface, with the Tokyo rainy-lane artwork confined to the sidebar and dark gradient overlays preserving quota readability.
+- Removed decorative Japanese vertical text and circular/filled sidebar index treatment; `01`, `02`, `03` remain plain unboxed indices. The existing `LogIn` icon for `Add account` was preserved unchanged.
+- Added restrained warm-ivory hairlines, vermilion active marker, serif navigation titles, subtle paper/grain texture, and low-contrast logo etching. Account/quota behavior was not changed.
+- Verification: `npm.cmd run build` passed (`tsc` plus Vite production build, 1,590 modules). The production bundle includes `sidebar-yoru-lane-B0PNKoib.png` at 2,067.14 kB. No live installed Tauri window inspection was performed in this UI-only pass.

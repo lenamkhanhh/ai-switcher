@@ -3000,3 +3000,114 @@ button.danger:hover:not(:disabled) {
 .autoStatsTable th:first-child {
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------- Japanese noir unified shell ---------- */
+:root {
+  --bg-window: #08090a;
+  --bg-sidebar: rgba(8, 9, 10, 0.94);
+  --surface: #0d0f10;
+  --surface-2: #121416;
+  --surface-hover: #181b1d;
+  --text: #eee8dc;
+  --text-2: #b6afa4;
+  --text-3: #77746f;
+  --line: rgba(222, 207, 180, 0.14);
+  --line-strong: rgba(222, 207, 180, 0.26);
+  --edge: inset 0 1px 0 rgba(255, 237, 200, 0.04);
+  --edge-strong: inset 0 1px 0 rgba(255, 237, 200, 0.08);
+  --accent: #aaa9ff;
+  --accent-press: #c6c5ff;
+  --accent-soft: rgba(170, 169, 255, 0.14);
+  --green: #32c98c;
+  --amber: #d6a94a;
+  --red: #f25469;
+  --green-soft: rgba(50, 201, 140, 0.15);
+  --amber-soft: rgba(214, 169, 74, 0.15);
+  --red-soft: rgba(242, 84, 105, 0.15);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.56), 0 16px 36px rgba(0, 0, 0, 0.26);
+  --radius: 13px;
+  --radius-sm: 9px;
+  background: radial-gradient(1000px 620px at 84% -18%, rgba(102, 23, 26, 0.12), transparent 64%), #08090a;
+  font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+.shell { padding: 0 22px 22px; }
+.topbar { background: #08090a; border-bottom-color: rgba(222, 207, 180, 0.1); }
+.workspace {
+  gap: 0;
+  grid-template-columns: 292px minmax(0, 1fr);
+  background: linear-gradient(90deg, rgba(8, 9, 10, 0.98) 0 292px, rgba(13, 15, 16, 0.96) 292px), #08090a;
+  border: 1px solid rgba(222, 207, 180, 0.13);
+  border-radius: 18px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 237, 200, 0.04);
+  overflow: hidden;
+}
+.sidebar {
+  background: linear-gradient(180deg, rgba(8, 9, 10, 0.34), rgba(8, 9, 10, 0.66)), url("./assets/sidebar-yoru-lane.png") left bottom / cover no-repeat, #08090a;
+  border: 0;
+  border-right: 1px solid rgba(222, 207, 180, 0.16);
+  border-radius: 0;
+  box-shadow: none;
+}
+.sidebar::before {
+  background: radial-gradient(420px 320px at 16% 80%, rgba(164, 31, 34, 0.12), transparent 66%), linear-gradient(180deg, rgba(8, 9, 10, 0.1) 0%, rgba(8, 9, 10, 0.34) 26%, rgba(8, 9, 10, 0.67) 58%, rgba(8, 9, 10, 0.86) 100%), linear-gradient(90deg, rgba(8, 9, 10, 0.04), rgba(8, 9, 10, 0.78) 96%);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+.sidebar::after {
+  background: radial-gradient(240px 160px at 0% 0%, rgba(255, 237, 200, 0.04), transparent 75%), repeating-radial-gradient(circle at 12% 18%, transparent 0 2px, rgba(255, 255, 255, 0.012) 3px 4px);
+  content: "";
+  inset: 0;
+  mix-blend-mode: screen;
+  opacity: 0.55;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+.sidebarBrand { gap: 13px; min-height: 150px; padding: 28px 24px 22px; }
+.sidebarBrandMark { height: 54px; width: 54px; }
+.sidebarBrandMark img { filter: sepia(0.18) saturate(0.78) brightness(1.08); height: 52px; opacity: 0.94; width: 52px; }
+.sidebarBrand > strong { color: #e0d7c8; font-family: Georgia, "Times New Roman", serif; font-size: 10px; font-weight: 500; letter-spacing: 0.2em; }
+.sidebarBrandRule { background: linear-gradient(90deg, rgba(224, 215, 200, 0.68), rgba(224, 215, 200, 0.04)); margin-top: 3px; width: 58px; }
+.sidebarNav { gap: 3px; padding: 8px 18px 0; }
+.toolTab { gap: 14px; grid-template-columns: 30px minmax(0, 1fr) auto; min-height: 82px; padding: 12px 10px; }
+.sidebarNavIcon { color: #c8bcaa; height: 28px; width: 28px; }
+.sidebarNavIcon svg { height: 20px; stroke-width: 1.5; width: 20px; }
+.sidebarNavCopy { gap: 5px; }
+.sidebarNavCopy strong { color: #d9d0c3; font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 500; letter-spacing: 0; }
+.sidebarNavCopy small { color: #91897f; font-size: 11.5px; }
+.sidebarNavIndex { align-self: center; color: #a59b8c; font-size: 11px; min-width: 20px; }
+.toolTab:hover:not(.selected) { background: rgba(17, 13, 12, 0.26); }
+.sidebar .toolTab.selected, .sidebar .toolTab.selected:hover:not(:disabled) { background: linear-gradient(90deg, rgba(95, 27, 25, 0.28), rgba(20, 14, 13, 0.08)); border: 0; box-shadow: none; }
+.toolTab.selected::before { background: #e34e4b; border-radius: 0; content: ""; height: 100%; left: 0; position: absolute; top: 0; width: 2px; }
+.toolTab.selected .sidebarNavIcon { color: #ead7b5; }
+.toolTab.selected .sidebarNavCopy strong { color: #fff1dc; }
+.toolTab.selected .sidebarNavCopy small { color: #c0a986; }
+.toolTab.selected .sidebarNavCopy::after { background: linear-gradient(90deg, rgba(224, 191, 132, 0.84), transparent); height: 1px; margin-top: 7px; width: 76px; }
+.toolTab.selected .sidebarNavIndex { color: #e3c27e; }
+.toolTab.selected .sidebarNavIndex::after { content: none; }
+.sidebarEtching { bottom: 70px; opacity: 0.045; }
+.sidebarEtching img { filter: grayscale(1) sepia(0.16) contrast(0.76); height: 150px; width: 150px; }
+.sidebarFoot { border-top-color: rgba(224, 215, 200, 0.14); justify-content: flex-start; margin: 0 24px; padding: 14px 0 18px; }
+.sidebarCredit { color: #a29a90; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-size: 10.5px; }
+.sidebarCredit::before { background: #d94b48; border-radius: 50%; content: ""; display: inline-block; height: 6px; margin-right: 8px; width: 6px; }
+.panel { background: rgba(13, 15, 16, 0.96); border: 0; border-radius: 0; box-shadow: none; padding: 24px 24px 28px; }
+.titleRow h2 { font-family: Georgia, "Times New Roman", serif; font-size: 25px; font-weight: 500; letter-spacing: -0.015em; }
+.actions > button:first-of-type { border-color: rgba(217, 75, 72, 0.48); background: rgba(30, 13, 13, 0.54); }
+.actions > button:first-of-type:hover:not(:disabled) { background: rgba(75, 24, 22, 0.42); border-color: rgba(229, 88, 84, 0.72); }
+.actions > button svg { stroke-width: 1.7; }
+.drift { background: rgba(64, 58, 94, 0.34); border-left: 2px solid #df4f4b; }
+.accountGrid { gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.account { background: rgba(13, 15, 16, 0.92); border-color: rgba(222, 207, 180, 0.14); border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255, 237, 200, 0.025), 0 12px 28px rgba(0, 0, 0, 0.24); }
+.account:hover { border-color: rgba(222, 207, 180, 0.26); }
+.account.active { box-shadow: 0 0 0 1.5px var(--accent), inset 0 1px 0 rgba(255, 237, 200, 0.05), var(--shadow-card); }
+.account.exhausted { box-shadow: 0 0 0 1.5px var(--amber), inset 0 1px 0 rgba(255, 237, 200, 0.04), var(--shadow-card); }
+@media (max-width: 900px) {
+  .workspace { grid-template-columns: 214px minmax(0, 1fr); }
+  .sidebarBrand { padding-left: 16px; padding-right: 16px; }
+  .sidebarNav { padding-left: 10px; padding-right: 10px; }
+  .toolTab { grid-template-columns: 28px minmax(0, 1fr) auto; padding-left: 6px; padding-right: 6px; }
+}
