@@ -693,3 +693,9 @@ Sau thay đổi hoặc rollback: mở thread mới/restart Codex và ghi sự ki
 - Removed decorative Japanese vertical text and circular/filled sidebar index treatment; `01`, `02`, `03` remain plain unboxed indices. The existing `LogIn` icon for `Add account` was preserved unchanged.
 - Added restrained warm-ivory hairlines, vermilion active marker, serif navigation titles, subtle paper/grain texture, and low-contrast logo etching. Account/quota behavior was not changed.
 - Verification: `npm.cmd run build` passed (`tsc` plus Vite production build, 1,590 modules). The production bundle includes `sidebar-yoru-lane-B0PNKoib.png` at 2,067.14 kB. No live installed Tauri window inspection was performed in this UI-only pass.
+
+### 2026-07-25 - Applied Japanese noir UI to installed Windows app
+- Ran `npm.cmd run tauri build`; production Vite build passed, Rust release build passed with the repository's existing 83 dead-code warnings, and MSI/NSIS bundles were generated.
+- Replaced the installed executable at `C:\Users\HP\AppData\Local\AI Account Switcher\ai-account-switcher.exe` with the release executable from `src-tauri\target\release\ai-account-switcher.exe`.
+- Live verification: release and installed SHA-256 both equal `4F5B0713861833429975CC586353E3F7033A2E700C247619BB6C5933B59BB3D5`; process PID `13612` remained alive, `Responding = True`, title `AI Account Switcher`, nonzero main-window handle `133086`.
+- Live visual inspection: unified shell, Tokyo sidebar background, plain sidebar indices, red active marker, quota cards, and preserved Add account control are visible in the installed app. No account/login action was clicked.
