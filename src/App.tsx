@@ -29,12 +29,40 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "./tauri";
+
+/// `getCurrentWindow()` reads `window.__TAURI_INTERNALS__.metadata` synchronously and is not
+/// guarded, so outside the Tauri shell it throws. Thrown from an effect with no error boundary
+/// above it, that unmounts the whole React root — `npm run dev` in a plain browser rendered a
+/// white screen. The mock layer in `./tauri` only covers `invoke`, not the window API.
+// Runs an action at most once at a time. Modal submits are slow (creating an account spawns an
+// interactive login), and the dialog only closes once the call resolves, so a second click on a
+// button that looks idle would fire the whole request again.
+function useSingleFlight(action: () => void | Promise<void>) {
+  const [running, setRunning] = useState(false);
+  const run = () => {
+    if (running) return;
+    setRunning(true);
+    void Promise.resolve()
+      .then(action)
+      .finally(() => setRunning(false));
+  };
+  return [run, running] as const;
+}
+
+const nativeWindow = () => {
+  if (!("__TAURI_INTERNALS__" in window)) return null;
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
+};
 import { UsageView } from "./UsageView";
 import logoUrl from "./assets/logo-luxury.png";
 import type {
@@ -152,6 +180,8 @@ export function App() {
   const [loginPrompt, setLoginPrompt] = useState<LoginPromptEvent | null>(null);
   const [version, setVersion] = useState("");
   const [setupPrompted, setSetupPrompted] = useState<Set<ToolId>>(new Set());
+  // Last Codex device code we raised a toast for, so a repeated event can't re-announce it.
+  const announcedDeviceCode = useRef<string | null>(null);
 
   useEffect(() => {
     getVersion()
@@ -160,7 +190,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const appWindow = getCurrentWindow();
+    const appWindow = nativeWindow();
+    if (!appWindow) return;
     let disposed = false;
     let unlistenResize: (() => void) | undefined;
     const syncWindowState = async () => {
@@ -200,7 +231,8 @@ export function App() {
   }, []);
 
   const toggleWindowMaximize = useCallback(async () => {
-    const appWindow = getCurrentWindow();
+    const appWindow = nativeWindow();
+    if (!appWindow) return;
     try {
       await appWindow.toggleMaximize();
       setWindowMaximized(await appWindow.isMaximized());
@@ -235,6 +267,17 @@ export function App() {
     };
   }, []);
 
+  // Stable identity for the set of CLI tools to poll. `snapshot` is replaced on every refresh, so
+  // the poller below must not depend on `snapshot.tools` directly.
+  const cliToolIdKey = useMemo(
+    () =>
+      snapshot.tools
+        .filter((tool) => tool.id !== "antigravity")
+        .map((tool) => tool.id)
+        .join(","),
+    [snapshot.tools],
+  );
+
   // Auto-refresh real quota only while the app window is FOCUSED. Losing focus (typing in another
   // app, even if this window is still visible) stops the polling; refocusing refreshes immediately
   // and resumes. `refresh_tool` fetches live usage; an `inFlight` guard coalesces overlapping
@@ -249,10 +292,8 @@ export function App() {
     const tick = () => {
       if (cancelled || inFlight) return;
       inFlight = true;
-      const cliToolIds = snapshot.tools
-        .filter((tool) => tool.id !== "antigravity")
-        .map((tool) => tool.id);
-      Promise.allSettled(cliToolIds.map((toolId) => api.refreshTool(toolId).then(setSnapshot))).finally(() => {
+      const toolIds = cliToolIdKey.split(",").filter(Boolean) as ToolId[];
+      Promise.allSettled(toolIds.map((toolId) => api.refreshTool(toolId).then(setSnapshot))).finally(() => {
         inFlight = false;
       });
     };
@@ -270,7 +311,15 @@ export function App() {
 
     // Register the focus listener BEFORE reading the current focus, so we can't miss a blur that
     // happens between the isFocused() read and the listener being installed.
-    const appWindow = getCurrentWindow();
+    const appWindow = nativeWindow();
+    if (!appWindow) {
+      // No native focus events in the browser fallback: poll on the plain interval instead.
+      start();
+      return () => {
+        cancelled = true;
+        stop();
+      };
+    }
     void appWindow
       .onFocusChanged(({ payload: focused }) => {
         if (cancelled) return;
@@ -294,7 +343,10 @@ export function App() {
       stop();
       unlisten?.();
     };
-  }, [snapshot.tools]);
+    // Keyed on the tool ids, NOT on `snapshot.tools`: every refresh_tool response is a brand-new
+    // snapshot object, so depending on the array itself would tear down and re-run this effect on
+    // data it produced, re-firing `tick()` immediately and refreshing in a tight loop.
+  }, [cliToolIdKey]);
 
   // Banner when the app auto-switches an account because quota ran out.
   useEffect(() => {
@@ -333,11 +385,15 @@ export function App() {
                 deviceCode: event.payload.deviceCode ?? current.deviceCode,
               }
             : event.payload;
-        if (next.deviceCode && next.deviceCode !== current?.deviceCode) {
-          notify("Codex login code is ready in the app.", "info");
-        }
         return next;
       });
+      // Announced outside the updater: React double-invokes updaters under StrictMode, which
+      // fired this toast twice in dev.
+      const code = event.payload.deviceCode;
+      if (code && code !== announcedDeviceCode.current) {
+        announcedDeviceCode.current = code;
+        notify("Codex login code is ready in the app.", "info");
+      }
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -497,7 +553,7 @@ export function App() {
               type="button"
               aria-label="Minimize"
               title="Minimize"
-              onClick={() => void getCurrentWindow().minimize().catch(() => {})}
+              onClick={() => void nativeWindow()?.minimize().catch(() => {})}
             >
               <Minus />
             </button>
@@ -514,7 +570,7 @@ export function App() {
               className="close"
               aria-label="Close"
               title="Close"
-              onClick={() => void getCurrentWindow().close().catch(() => {})}
+              onClick={() => void nativeWindow()?.close().catch(() => {})}
             >
               <X />
             </button>
@@ -696,8 +752,6 @@ export function App() {
               title="https://hoangphan.blog/"
             >
               {version && <span>v{version}</span>}
-              {version && <i aria-hidden>·</i>}
-              <span>Hoàng Phan</span>
             </button>
           </div>
         </aside>
@@ -1113,6 +1167,7 @@ function ApiGatewayView({
   const [threshold, setThreshold] = useState(String(gateway.config.quotaThreshold));
   const [allowLan, setAllowLan] = useState(gateway.config.bindHost === "0.0.0.0");
   const [rotationStrategy, setRotationStrategy] = useState(gateway.config.rotationStrategy);
+  const [portError, setPortError] = useState<string | null>(null);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [comboEditing, setComboEditing] = useState<ApiGatewayCombo | null>(null);
   const [showComboModal, setShowComboModal] = useState(false);
@@ -1188,11 +1243,19 @@ function ApiGatewayView({
   }, [onRefresh, running]);
 
   const submitStart = async () => {
+    // `Number(port) || 8783` used to swallow a typo and start the server on a port the user
+    // never asked for, while the field still showed what they typed.
+    const parsedPort = Number(port);
+    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      setPortError("Enter a port between 1 and 65535");
+      return;
+    }
+    setPortError(null);
     setStarting(true);
     try {
       const ok = await onStart({
         bindHost: allowLan ? "0.0.0.0" : "127.0.0.1",
-        port: Number(port) || 8783,
+        port: parsedPort,
         quotaThreshold: Number(threshold) || 95,
         rotationStrategy,
       });
@@ -1273,7 +1336,12 @@ function ApiGatewayView({
             </label>
             <label>
               Port
-              <input value={port} onChange={(event) => setPort(event.target.value)} />
+              <input
+                value={port}
+                onChange={(event) => setPort(event.target.value)}
+                disabled={running}
+                title={running ? "Stop the gateway to change the port." : undefined}
+              />
             </label>
             <label>
               <span>
@@ -1282,10 +1350,19 @@ function ApiGatewayView({
               <input
                 value={threshold}
                 onChange={(event) => setThreshold(event.target.value)}
-                title="Drop an account from rotation once its quota usage passes this percentage."
+                disabled={running}
+                title={
+                  running
+                    ? "Stop the gateway to change the quota cutoff."
+                    : "Drop an account from rotation once its quota usage passes this percentage."
+                }
               />
             </label>
           </div>
+          {portError && <p className="quotaError">{portError}</p>}
+          {running && (
+            <p className="hint">Server settings apply on start — stop the gateway to change them.</p>
+          )}
           <div className="apiToggleRow">
             <span>
               <strong>Allow LAN access</strong>
@@ -1357,10 +1434,18 @@ function ApiGatewayView({
               <strong>Accounts</strong>
               <small>Toggle which subscription accounts the gateway may rotate through.</small>
             </div>
-            <label className="apiRotation" title="On = rotate accounts round-robin. Off = fill one until exhausted.">
+            <label
+              className="apiRotation"
+              title={
+                running
+                  ? "Stop the gateway to change the rotation strategy."
+                  : "On = rotate accounts round-robin. Off = fill one until exhausted."
+              }
+            >
               <span>Round-robin</span>
               <Toggle
                 checked={rotationStrategy === "roundRobin"}
+                disabled={running}
                 onChange={(next) => setRotationStrategy(next ? "roundRobin" : "fillFirst")}
               />
             </label>
@@ -2303,7 +2388,10 @@ function AddDialog({
     try {
       const list = await api.fetchGatewayModels(baseUrl.trim(), apiKey.trim());
       setModels(list);
-      if (list.length > 0 && !model) setModel(list[0]);
+      // Re-fetching after correcting the URL returns a different gateway's models. Keeping the
+      // previous selection would leave the <select> blank while still submitting a model the new
+      // gateway can't serve, so always re-anchor to the fetched list.
+      setModel((current) => (current && list.includes(current) ? current : (list[0] ?? "")));
     } catch (err) {
       setMessage(errorMessage(err));
     } finally {
@@ -2352,6 +2440,8 @@ function AddDialog({
       bypass,
     });
   };
+
+  const [runSubmit, submitting] = useSingleFlight(() => (isApi ? submitApi() : submit()));
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
@@ -2523,7 +2613,7 @@ function AddDialog({
         {message && <p className="quotaError">{message}</p>}
         <div className="modalActions">
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={isApi ? submitApi : submit}>
+          <button className="primary" onClick={runSubmit} disabled={submitting}>
             {isApi ? "Create account" : isCli ? "Create & login" : "Save this account"}
           </button>
         </div>
@@ -2552,6 +2642,7 @@ function NameDialog({
   onSubmit: (name: string) => Promise<void>;
 }) {
   const [name, setName] = useState(initialName);
+  const [runSubmit, submitting] = useSingleFlight(() => onSubmit(name.trim()));
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
@@ -2575,7 +2666,7 @@ function NameDialog({
         </label>
         <div className="modalActions">
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={() => onSubmit(name.trim())}>
+          <button className="primary" onClick={runSubmit} disabled={submitting}>
             {submitText}
           </button>
         </div>
@@ -2636,6 +2727,8 @@ function CliSetupDialog({
       defaultConfigDir: configDir.trim(),
     });
   };
+
+  const [runSave, saving] = useSingleFlight(save);
 
   const binaryChoices = report?.binaryCandidates ?? [];
   const configChoices = report?.configCandidates ?? [];
@@ -2718,7 +2811,7 @@ function CliSetupDialog({
             </button>
           )}
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={save}>
+          <button className="primary" onClick={runSave} disabled={saving}>
             {simpleRecommendation ? "Save recommended paths" : "Save paths"}
           </button>
         </div>

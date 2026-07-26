@@ -998,8 +998,9 @@ fn shared_target_to(tool_id: &ToolId, name: &str, default_config_dir: &Path) -> 
 /// a session created by another account, even in the same project. The token stays
 /// per-profile so quotas don't mix. Idempotent — safe to call again.
 pub fn link_shared_sessions_to(tool_id: &ToolId, profile: &Path, default_config_dir: &Path) {
+    let can_link = symlinks_supported(profile);
     for name in shared_session_names(tool_id) {
-        link_shared_entry(tool_id, profile, name, true, default_config_dir);
+        link_shared_entry(tool_id, profile, name, true, default_config_dir, can_link);
     }
 }
 
@@ -1009,8 +1010,9 @@ pub fn link_shared_config_to(tool_id: &ToolId, profile: &Path, default_config_di
     // Remove any stale symlinks that were previously created but are no longer in the shared list
     // (e.g. memories_1.sqlite was removed to fix SQLite lock contention).
     remove_stale_shared_symlinks(tool_id, profile, default_config_dir);
+    let can_link = symlinks_supported(profile);
     for name in shared_config_names(tool_id) {
-        link_shared_entry(tool_id, profile, name, false, default_config_dir);
+        link_shared_entry(tool_id, profile, name, false, default_config_dir, can_link);
     }
 }
 
@@ -1049,9 +1051,16 @@ fn link_shared_entry(
     name: &str,
     merge_dirs: bool,
     default_config_dir: &Path,
+    can_link: bool,
 ) {
     // Don't link to itself (Default account = ~/.claude, ~/.codex).
     if profile == default_config_dir {
+        return;
+    }
+    // Everything below moves the profile's real entry into the shared store and replaces it with
+    // a symlink. Without symlink support that is a one-way delete, so leave the account alone and
+    // let it keep its own config.
+    if !can_link {
         return;
     }
 
@@ -1126,9 +1135,48 @@ fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-#[cfg(not(unix))]
+/// Windows needs a separate call for file vs directory links, and both require either Developer
+/// Mode or elevation. Failure is reported, never swallowed — `link_shared_entry` relies on the
+/// error to leave the profile's real entry untouched.
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
+/// Whether this process may create symlinks under `probe_dir`. On Windows that takes Developer
+/// Mode or elevation, so it is probed once per run and cached. Without it, config sharing must
+/// stay off entirely: `link_shared_entry` removes the profile's real entry before linking, so a
+/// silent link failure would delete the account's own config and put nothing back.
+fn symlinks_supported(probe_dir: &Path) -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        if fs::create_dir_all(probe_dir).is_err() {
+            return false;
+        }
+        let stamp = std::process::id();
+        let target = probe_dir.join(format!(".symlink-probe-{stamp}"));
+        let link = probe_dir.join(format!(".symlink-probe-link-{stamp}"));
+        let _ = fs::remove_file(&link);
+        if fs::write(&target, b"probe").is_err() {
+            return false;
+        }
+        let ok = create_symlink(&target, &link).is_ok();
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        ok
+    })
 }
 
 /// Seed the "onboarding done" flag into the profile's `.claude.json` so interactive `claude`
@@ -2348,4 +2396,108 @@ fn set_owner_only_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_owner_only_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod shared_link_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("aisw-link-{name}-{unique}"))
+    }
+
+    /// Windows without Developer Mode cannot create symlinks. The profile must keep its own
+    /// config instead of having it deleted with nothing put back in its place.
+    #[test]
+    fn profile_config_survives_when_symlinks_are_unavailable() {
+        let root = temp_root("nolink");
+        let profile = root.join("profile");
+        let default_dir = root.join("default");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir_all(&default_dir).unwrap();
+        fs::write(profile.join("config.toml"), b"model = \"profile\"").unwrap();
+        fs::write(default_dir.join("config.toml"), b"model = \"default\"").unwrap();
+        fs::create_dir_all(profile.join("skills")).unwrap();
+        fs::write(profile.join("skills").join("own.md"), b"mine").unwrap();
+
+        link_shared_entry(
+            &ToolId::Codex,
+            &profile,
+            "config.toml",
+            false,
+            &default_dir,
+            false,
+        );
+        link_shared_entry(
+            &ToolId::Codex,
+            &profile,
+            "skills",
+            true,
+            &default_dir,
+            false,
+        );
+
+        assert_eq!(
+            fs::read(profile.join("config.toml")).unwrap(),
+            b"model = \"profile\"",
+            "profile config.toml must not be deleted when it cannot be replaced by a symlink"
+        );
+        assert!(
+            profile.join("skills").join("own.md").exists(),
+            "profile skills dir must not be emptied when it cannot be replaced by a symlink"
+        );
+        // The default config must be left exactly as it was, not overwritten by the profile's.
+        assert_eq!(
+            fs::read(default_dir.join("config.toml")).unwrap(),
+            b"model = \"default\""
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// When symlinks do work, the profile entry is replaced by a link to the shared target.
+    #[test]
+    fn profile_config_is_linked_when_symlinks_work() {
+        let root = temp_root("link");
+        let profile = root.join("profile");
+        let default_dir = root.join("default");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir_all(&default_dir).unwrap();
+
+        // Skip on hosts that can't create symlinks at all (Windows without Developer Mode).
+        let probe_target = root.join("probe");
+        let probe_link = root.join("probe-link");
+        fs::write(&probe_target, b"probe").unwrap();
+        if create_symlink(&probe_target, &probe_link).is_err() {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        fs::write(profile.join("config.toml"), b"model = \"profile\"").unwrap();
+        fs::write(default_dir.join("config.toml"), b"model = \"default\"").unwrap();
+
+        link_shared_entry(
+            &ToolId::Codex,
+            &profile,
+            "config.toml",
+            false,
+            &default_dir,
+            true,
+        );
+
+        let link = profile.join("config.toml");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "profile entry should become a symlink to the shared config"
+        );
+        assert_eq!(fs::read(&link).unwrap(), b"model = \"default\"");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

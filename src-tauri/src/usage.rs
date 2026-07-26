@@ -112,6 +112,13 @@ pub fn build_report(
 ) -> UsageReport {
     let mut cache = load_cache(cache_path);
 
+    // A file that is now shorter than its recorded cursor was rotated, truncated or replaced. Its
+    // old lines are already baked into the cumulative buckets and can't be subtracted, so reading
+    // the replacement from byte 0 would add them a second time. Rebuild everything instead.
+    if tracked_file_shrank(&cache) {
+        cache = UsageCache::default();
+    }
+
     // The app symlinks the shared session store across profile dirs + the machine default, so the
     // same physical JSONL is reachable from several config dirs. Resolve symlinks and scan each
     // real file once, or its tokens get counted 2-3x.
@@ -145,6 +152,16 @@ pub fn build_report(
 // Incremental file reading
 // ---------------------------------------------------------------------------
 
+/// True when a file the cache has already read is now shorter than the cursor into it, i.e. it was
+/// rotated, truncated or replaced. Buckets and sessions are cumulative, so the old contribution
+/// can't be subtracted from them — the only correct response is to rebuild the whole cache.
+fn tracked_file_shrank(cache: &UsageCache) -> bool {
+    cache
+        .files
+        .iter()
+        .any(|(path, cursor)| std::fs::metadata(path).is_ok_and(|meta| meta.len() < cursor.offset))
+}
+
 /// Reads the bytes appended since `offset`. Returns the complete lines plus the new offset
 /// (advanced only past the last newline, so a half-written final line waits for next time).
 fn read_new_lines(path: &Path, offset: u64) -> Option<(Vec<String>, u64)> {
@@ -156,8 +173,11 @@ fn read_new_lines(path: &Path, offset: u64) -> Option<(Vec<String>, u64)> {
         return Some((Vec::new(), start));
     }
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // Lossy: a file still being written can end mid-character, and failing the whole read would
+    // skip the file until the next character happens to complete.
+    let buf = String::from_utf8_lossy(&bytes);
     let consumed = match buf.rfind('\n') {
         Some(idx) => idx + 1,
         None => 0,
@@ -835,5 +855,26 @@ mod tests {
         // m1 (5+7) + m2 (3+4) counted exactly once each.
         assert_eq!(total.input, 8);
         assert_eq!(total.output, 11);
+    }
+
+    /// A rotated or truncated log must invalidate the cache. Re-reading it from byte 0 while the
+    /// old lines are still in the cumulative buckets would report up to double the real tokens.
+    #[test]
+    fn a_shrunken_file_invalidates_the_cache() {
+        let mut cache = UsageCache::default();
+        let tmp = std::env::temp_dir().join("aisw_claude_test_shrink.jsonl");
+        let line = r#"{"message":{"model":"claude-x","id":"m1","role":"assistant","usage":{"input_tokens":5,"output_tokens":7,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"timestamp":"2026-06-01T10:00:00.000Z"}"#;
+        std::fs::write(&tmp, format!("{line}\n{line}\n")).unwrap();
+        scan_claude_file(&tmp, &mut cache);
+        assert!(
+            !tracked_file_shrank(&cache),
+            "an untouched file is not stale"
+        );
+
+        // The log is rotated away and a shorter one takes its place.
+        std::fs::write(&tmp, format!("{line}\n")).unwrap();
+        assert!(tracked_file_shrank(&cache));
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }

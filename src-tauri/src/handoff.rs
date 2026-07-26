@@ -246,10 +246,43 @@ fn latest_rollout_file(sessions_dir: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+/// Rollout files routinely reach hundreds of megabytes, and this runs on the 10s watcher thread.
+/// Only the head (`session_meta` with the session id) and the tail (the recent turns, the latest
+/// `turn_context`, and the task-started/complete pairs that decide whether the session is idle)
+/// carry anything a handoff needs, so the middle is never loaded or parsed.
+const HEAD_SCAN_BYTES: u64 = 256 * 1024;
+const TAIL_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
 fn read_lines(path: &Path) -> Result<Vec<String>> {
     let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    Ok(reader.lines().map_while(Result::ok).collect())
+    let len = file.metadata()?.len();
+    if len <= HEAD_SCAN_BYTES + TAIL_SCAN_BYTES {
+        let reader = std::io::BufReader::new(file);
+        return Ok(reader.lines().map_while(Result::ok).collect());
+    }
+
+    let mut lines = read_byte_range_lines(&file, 0, HEAD_SCAN_BYTES)?;
+    // The head ends mid-line, and the tail starts mid-line; drop both fragments.
+    lines.pop();
+    let mut tail = read_byte_range_lines(&file, len - TAIL_SCAN_BYTES, TAIL_SCAN_BYTES)?;
+    if !tail.is_empty() {
+        tail.remove(0);
+    }
+    lines.extend(tail);
+    Ok(lines)
+}
+
+fn read_byte_range_lines(file: &std::fs::File, offset: u64, len: u64) -> Result<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut handle = file.try_clone()?;
+    handle.seek(SeekFrom::Start(offset))?;
+    let mut buffer = Vec::new();
+    handle.take(len).read_to_end(&mut buffer)?;
+    // Lossy: a byte range cut at an arbitrary offset can split a multi-byte character.
+    Ok(String::from_utf8_lossy(&buffer)
+        .lines()
+        .map(ToString::to_string)
+        .collect())
 }
 
 fn build_handoff_prompt_from_lines(

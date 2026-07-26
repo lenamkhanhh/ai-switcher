@@ -20,7 +20,20 @@ pub fn resume_args<'a>(session_id: &'a str, prompt: &'a str) -> [&'a str; 3] {
     ["resume", session_id, prompt]
 }
 
-pub fn select_candidate<'a>(accounts: &'a [Account], current_id: &str) -> Option<&'a Account> {
+/// Pick the Codex account to hand the session over to.
+///
+/// `must_improve_on` is the current account's 5-hour usage, and is set whenever the switch was
+/// decided from quota numbers rather than a hard failure. Candidates are allowed up to
+/// `CANDIDATE_LIMIT`, which sits above the default switch threshold, so without this the app can
+/// hand off to an account that is itself already over the threshold and then hand off again on
+/// the next poll — ping-ponging between two nearly-exhausted accounts, spawning a resume console
+/// each time. When the switch is forced by a real quota error the reported numbers can't be
+/// trusted, so no improvement is required.
+pub fn select_candidate<'a>(
+    accounts: &'a [Account],
+    current_id: &str,
+    must_improve_on: Option<f64>,
+) -> Option<&'a Account> {
     let mut eligible: Vec<&Account> = accounts
         .iter()
         .filter(|account| {
@@ -35,6 +48,9 @@ pub fn select_candidate<'a>(accounts: &'a [Account], current_id: &str) -> Option
                         // signal, so keep the account eligible and rank unknown 5h last.
                         && quota.five_hour.percent_used.is_none_or(|v| v < CANDIDATE_LIMIT)
                         && quota.weekly.percent_used.is_some_and(|v| v < 100.0)
+                        && must_improve_on.is_none_or(|current| {
+                            quota.five_hour.percent_used.is_none_or(|v| v < current)
+                        })
                 })
         })
         .collect();
@@ -173,6 +189,71 @@ mod tests {
         assert!(!resume_args("session-uuid", "checkpoint").contains(&"--last"));
     }
 
+    fn codex_account(id: &str, five_hour: f64) -> Account {
+        Account {
+            id: id.into(),
+            name: id.into(),
+            tool_id: ToolId::Codex,
+            state: AccountState::Idle,
+            fingerprint: id.into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_used_at: None,
+            launcher_command: None,
+            launcher_paths: None,
+            is_default: false,
+            avatar_url: None,
+            account_email: None,
+            api_provider: None,
+            quota_status: None,
+            codex_login_method: crate::models::CodexLoginMethod::DeviceCode,
+            quota: Some(crate::models::QuotaInfo {
+                five_hour: crate::models::QuotaWindow {
+                    label: "5-hour".into(),
+                    percent_used: Some(five_hour),
+                    reset_at: None,
+                },
+                weekly: crate::models::QuotaWindow {
+                    label: "Weekly".into(),
+                    percent_used: Some(40.0),
+                    reset_at: None,
+                },
+                models: None,
+                plan: None,
+                updated_at: None,
+                error: None,
+            }),
+        }
+    }
+
+    /// Candidates are allowed above the switch threshold, so a quota-driven switch must still
+    /// pick an account with more headroom — otherwise the app ping-pongs between two accounts
+    /// that are both over the threshold, spawning a resume console every poll.
+    #[test]
+    fn quota_driven_switch_requires_an_account_with_more_headroom() {
+        let accounts = vec![codex_account("current", 93.0), codex_account("worse", 94.0)];
+
+        assert!(
+            select_candidate(&accounts, "current", Some(93.0)).is_none(),
+            "an account with less headroom is not an improvement"
+        );
+
+        // A switch forced by a real quota error can't trust the numbers and takes what's there.
+        assert_eq!(
+            select_candidate(&accounts, "current", None).map(|a| a.id.as_str()),
+            Some("worse")
+        );
+
+        let accounts = vec![
+            codex_account("current", 93.0),
+            codex_account("better", 10.0),
+        ];
+        assert_eq!(
+            select_candidate(&accounts, "current", Some(93.0)).map(|a| a.id.as_str()),
+            Some("better")
+        );
+    }
+
     #[test]
     fn unknown_five_hour_quota_can_be_a_candidate_when_weekly_is_known() {
         let account = Account {
@@ -210,7 +291,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            select_candidate(&[account], "current").map(|a| a.id.as_str()),
+            select_candidate(&[account], "current", None).map(|a| a.id.as_str()),
             Some("candidate")
         );
     }

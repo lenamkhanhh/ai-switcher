@@ -5,6 +5,40 @@ All notable changes to **AI Account Switcher** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows no longer deletes profile config while "sharing" it.** Symlink creation was a
+  silent no-op on Windows, but the profile's real `config.toml`/`skills` had already been
+  removed to make room for the link. Real Windows symlinks are now created when supported,
+  and when they aren't the profile keeps its own files untouched.
+- **A corrupt `state.json` can no longer wipe every account.** Writes are serialized and
+  staged per-process, a backup of the last good state is kept, and loading falls back to it
+  instead of panicking at startup. `api_usage.json` and Codex `auth.json` got the same
+  crash-safe treatment; a locked `auth.json` no longer discards a rotated refresh token
+  (which forced a permanent re-login).
+- **Deleting the account the bare `codex` command uses now clears the active profile even
+  when that account is exhausted**, instead of leaving the CLI pointing at a deleted folder.
+- **Auto-switch no longer cascades.** One quota event could walk every account in the
+  92–95% band, spawning a resume console for each; a reentrancy guard plus a
+  "candidate must have more headroom" rule stop the ping-pong.
+- **The rollout watcher no longer misses quota errors** when its read lands mid-character
+  in a file Codex is still writing, and no longer loads multi-hundred-MB rollouts into
+  memory on the 10-second watcher thread.
+- **Usage tab accuracy**: a rotated/truncated CLI log now rebuilds the cache instead of
+  double-counting its tokens.
+- **Gateway**: `stream: true` responses stream for real instead of arriving all at once at
+  the end (first-token timeouts); the final SSE event is no longer dropped when the
+  upstream omits a trailing newline; combos can fall back to the same account's other
+  model; rate-limit cooldowns survive a gateway restart; API key comparison is
+  constant-time.
+- **UI**: quota polling no longer runs in a tight loop while the window is focused
+  (150-second interval restored); browser dev mode renders again; modal submit buttons
+  can't double-fire account creation; re-fetching gateway models re-anchors the selection;
+  gateway server settings are locked while running instead of silently not applying; the
+  Codex login-code toast no longer shows twice in dev.
+
 ## [0.5.5] - 2026-06-18
 
 ### Fixed

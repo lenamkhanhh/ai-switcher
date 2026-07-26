@@ -89,10 +89,15 @@ pub fn start_server(store: Store, config: ApiGatewayConfig) -> Result<ApiServerH
         config.port,
     );
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let mut runtime = GatewayRuntime::default();
+    // Routing reads cooldowns from memory, so a restart used to hand every rate-limited account a
+    // clean slate and walk straight back into the same 429 — while the UI still showed it cooling
+    // down from the persisted timestamp.
+    runtime.cooldowns = restore_cooldowns(&store);
     let state = GatewayState {
         store,
         client: reqwest::Client::new(),
-        runtime: Mutex::new(GatewayRuntime::default()),
+        runtime: Mutex::new(runtime),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -270,7 +275,7 @@ async fn handle_ai_request(
                 None => exhausted_response(&model),
             };
         };
-        tried.insert(selected.key.clone());
+        tried.insert((selected.key.clone(), selected.model.clone()));
         bind_session(&state, &session_id, &selected.key);
 
         let mut request_body = body.clone();
@@ -496,7 +501,7 @@ fn authorized_state(
         .api_gateway
         .keys
         .iter()
-        .find(|key| key.enabled && key.secret.as_deref() == Some(secret.as_str()))
+        .find(|key| key.enabled && secret_matches(key.secret.as_deref(), &secret))
     else {
         return Err(api_error(
             StatusCode::UNAUTHORIZED,
@@ -517,6 +522,52 @@ fn authorized_state(
         ));
     }
     Ok(data)
+}
+
+/// Rebuild the in-memory cooldown map from the timestamps persisted alongside each pool account.
+/// Entries already in the past are dropped.
+fn restore_cooldowns(store: &Store) -> HashMap<String, Instant> {
+    let Ok(data) = store.load() else {
+        return HashMap::new();
+    };
+    let now = chrono::Utc::now();
+    let mut cooldowns = HashMap::new();
+    for entry in &data.api_gateway.accounts {
+        let Some(until) = entry
+            .cooldown_until
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        else {
+            continue;
+        };
+        let remaining = until.with_timezone(&chrono::Utc) - now;
+        let Ok(remaining) = remaining.to_std() else {
+            continue; // already elapsed
+        };
+        cooldowns.insert(
+            account_key(&entry.tool_id, &entry.account_id),
+            Instant::now() + remaining,
+        );
+    }
+    cooldowns
+}
+
+/// Compare a presented key against a stored one without short-circuiting on the first differing
+/// byte, so response timing doesn't reveal how much of the key was guessed correctly.
+fn secret_matches(stored: Option<&str>, presented: &str) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    let stored = stored.as_bytes();
+    let presented = presented.as_bytes();
+    // Fold the length difference into the result instead of returning early on it.
+    let mut difference = (stored.len() ^ presented.len()) as u8;
+    for index in 0..stored.len().max(presented.len()) {
+        let left = stored.get(index).copied().unwrap_or(0);
+        let right = presented.get(index).copied().unwrap_or(0);
+        difference |= left ^ right;
+    }
+    difference == 0 && stored.len() == presented.len()
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -542,7 +593,7 @@ fn auth_key_id(data: &StoredState, headers: &HeaderMap) -> Option<String> {
     data.api_gateway
         .keys
         .iter()
-        .find(|key| key.secret.as_deref() == Some(secret.as_str()))
+        .find(|key| secret_matches(key.secret.as_deref(), &secret))
         .map(|key| key.id.clone())
 }
 
@@ -583,7 +634,7 @@ fn select_member(
     data: &StoredState,
     combo: &ApiGatewayCombo,
     session_id: &str,
-    tried: &HashSet<String>,
+    tried: &HashSet<(String, String)>,
 ) -> Option<SelectedMember> {
     let candidates = available_candidates(state, data, combo, tried);
     if candidates.is_empty() {
@@ -622,7 +673,7 @@ fn available_candidates(
     state: &GatewayState,
     data: &StoredState,
     combo: &ApiGatewayCombo,
-    tried: &HashSet<String>,
+    tried: &HashSet<(String, String)>,
 ) -> Vec<SelectedMember> {
     let now = Instant::now();
     let cooldowns = state
@@ -648,7 +699,11 @@ fn available_candidates(
             if !seen.insert((key.clone(), model.clone())) {
                 continue;
             }
-            if tried.contains(&key) || cooldowns.get(&key).is_some_and(|until| *until > now) {
+            // Tracked per (account, model): the same account can serve several members of a
+            // combo, and a model-specific failure must not disqualify its other models.
+            if tried.contains(&(key.clone(), model.clone()))
+                || cooldowns.get(&key).is_some_and(|until| *until > now)
+            {
                 continue;
             }
             if quota_percent(account) >= data.api_gateway.quota_threshold {
@@ -738,33 +793,33 @@ fn persist_member_state(
     let Some((tool_id, account_id)) = parse_account_key(account_key_value) else {
         return;
     };
-    let Ok(mut data) = state.store.load() else {
-        return;
-    };
-    // Upsert the participation entry's runtime state (it may not exist if the account was never
-    // toggled — default-enabled accounts have no row until something happens to them).
-    if let Some(entry) = data
-        .api_gateway
-        .accounts
-        .iter_mut()
-        .find(|entry| entry.tool_id == tool_id && entry.account_id == account_id)
-    {
-        entry.state = member_state;
-        entry.cooldown_until = cooldown_until;
-        entry.error = error;
-    } else {
-        data.api_gateway
+    // Read-modify-write under the store's write lock: these run on tokio workers without the
+    // app's state mutex, so a plain load/save pair would drop a concurrent account change.
+    let _ = state.store.update(|data| {
+        // Upsert the participation entry's runtime state (it may not exist if the account was never
+        // toggled — default-enabled accounts have no row until something happens to them).
+        if let Some(entry) = data
+            .api_gateway
             .accounts
-            .push(crate::models::ApiGatewayAccount {
-                tool_id,
-                account_id,
-                enabled: true,
-                state: member_state,
-                cooldown_until,
-                error,
-            });
-    }
-    let _ = state.store.save(&data);
+            .iter_mut()
+            .find(|entry| entry.tool_id == tool_id && entry.account_id == account_id)
+        {
+            entry.state = member_state;
+            entry.cooldown_until = cooldown_until;
+            entry.error = error;
+        } else {
+            data.api_gateway
+                .accounts
+                .push(crate::models::ApiGatewayAccount {
+                    tool_id,
+                    account_id,
+                    enabled: true,
+                    state: member_state,
+                    cooldown_until,
+                    error,
+                });
+        }
+    });
 }
 
 fn account_key(tool_id: &ToolId, account_id: &str) -> String {
@@ -1547,18 +1602,29 @@ async fn translate_response(
     }
 
     // We force Codex upstream to stream, and some providers send SSE without a clear content-type,
-    // so buffer the body and detect SSE by its shape too (not only the header).
-    let body = match response.bytes().await {
-        Ok(body) => body,
-        Err(err) => {
-            return api_error(
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-                format!("Upstream response failed: {err}"),
-            )
+    // so read just enough of the body to detect SSE by its shape too (not only the header).
+    use futures_util::StreamExt;
+    let mut upstream = response.bytes_stream();
+    let mut prefix: Vec<u8> = Vec::new();
+    let mut upstream_ended = false;
+    while prefix.len() < 64 && !upstream_ended {
+        match upstream.next().await {
+            Some(Ok(chunk)) => prefix.extend_from_slice(&chunk),
+            Some(Err(err)) => {
+                if prefix.is_empty() {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_error",
+                        format!("Upstream response failed: {err}"),
+                    );
+                }
+                upstream_ended = true;
+            }
+            None => upstream_ended = true,
         }
-    };
-    let head = String::from_utf8_lossy(&body[..body.len().min(64)]);
+    }
+
+    let head = String::from_utf8_lossy(&prefix[..prefix.len().min(64)]);
     let head = head.trim_start();
     let looks_like_sse = content_type.contains("text/event-stream")
         || head.starts_with("event:")
@@ -1566,27 +1632,79 @@ async fn translate_response(
 
     if looks_like_sse {
         if client_wants_stream {
-            // Translate the SSE stream into the client's protocol on the fly.
+            // Forward events as they arrive. Buffering the whole upstream body first meant a
+            // client asking for `stream: true` got a `text/event-stream` response and then no
+            // bytes at all until generation finished, tripping first-token timeouts on a
+            // perfectly healthy upstream.
             let recorder = UsageRecorder::new(store, model, key_id, member, provider);
             let translate = provider != client;
-            let mut sniffer =
-                StreamUsageSniffer::new(provider, client, model.to_string(), recorder);
-            let out = if translate {
-                sniffer.push_translate(&body)
-            } else {
-                sniffer.push_passthrough(&body);
-                String::from_utf8_lossy(&body).into_owned()
-            };
+            let sniffer = StreamUsageSniffer::new(provider, client, model.to_string(), recorder);
+
+            let stream = futures_util::stream::unfold(
+                (Some(prefix), upstream, sniffer, upstream_ended, false),
+                move |(mut prefix, mut upstream, mut sniffer, mut ended, mut flushed)| async move {
+                    loop {
+                        let chunk = match prefix.take() {
+                            Some(first) if !first.is_empty() => Some(Bytes::from(first)),
+                            _ if ended => None,
+                            _ => match upstream.next().await {
+                                Some(Ok(bytes)) => Some(bytes),
+                                // An upstream error mid-stream ends the response; whatever was
+                                // already sniffed is still recorded when the recorder drops.
+                                Some(Err(_)) | None => {
+                                    ended = true;
+                                    None
+                                }
+                            },
+                        };
+
+                        let out = match chunk {
+                            Some(bytes) => {
+                                if translate {
+                                    sniffer.push_translate(&bytes)
+                                } else {
+                                    sniffer.push_passthrough(&bytes);
+                                    String::from_utf8_lossy(&bytes).into_owned()
+                                }
+                            }
+                            None if !flushed => {
+                                // Upstreams don't always terminate the final event with a
+                                // newline. Without this the last line stays in the sniffer's
+                                // buffer and the client never sees it — in the Anthropic→
+                                // Responses direction that is the `response.completed` envelope.
+                                flushed = true;
+                                sniffer.finish(translate)
+                            }
+                            None => return None,
+                        };
+
+                        if out.is_empty() {
+                            // Nothing to emit yet (a partial line): keep pulling rather than
+                            // yielding empty frames.
+                            if ended && flushed {
+                                return None;
+                            }
+                            continue;
+                        }
+                        return Some((
+                            Ok::<_, std::io::Error>(Bytes::from(out)),
+                            (prefix, upstream, sniffer, ended, flushed),
+                        ));
+                    }
+                },
+            );
+
             return (
                 status,
                 [(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("text/event-stream"),
                 )],
-                out,
+                axum::body::Body::from_stream(stream),
             )
                 .into_response();
         }
+        let body = drain_upstream(prefix, upstream, upstream_ended).await;
         // Client wants a single JSON answer: collapse the SSE into the final response object,
         // record usage, then translate to the client's JSON shape.
         let value = aggregate_sse_to_json(&body, provider);
@@ -1601,6 +1719,7 @@ async fn translate_response(
         return (status, Json(translated)).into_response();
     }
 
+    let body = drain_upstream(prefix, upstream, upstream_ended).await;
     let value: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
@@ -1617,6 +1736,26 @@ async fn translate_response(
     );
     let translated = translate_json_response(value, provider, client, model);
     (status, Json(translated)).into_response()
+}
+
+/// Read the rest of an upstream body that was already partially consumed while sniffing its shape.
+/// Used by the non-streaming paths, which need the whole response before they can answer.
+async fn drain_upstream(
+    prefix: Vec<u8>,
+    mut upstream: impl futures_util::Stream<Item = reqwest::Result<Bytes>> + Unpin,
+    ended: bool,
+) -> Bytes {
+    use futures_util::StreamExt;
+    let mut body = prefix;
+    if !ended {
+        while let Some(next) = upstream.next().await {
+            match next {
+                Ok(chunk) => body.extend_from_slice(&chunk),
+                Err(_) => break,
+            }
+        }
+    }
+    Bytes::from(body)
 }
 
 /// Collapse a buffered SSE body into the single final response JSON for the given provider.
@@ -1745,6 +1884,13 @@ fn record_api_usage(
     member: &SelectedMember,
     tokens: TokenBreakdown,
 ) {
+    // Requests complete on several workers at once; without this each would read the same
+    // snapshot, add its own row and overwrite the other's tokens.
+    static USAGE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = USAGE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let account_id = member.account.id.clone();
     let mut report = read_api_usage(store);
     let now = chrono::Utc::now().to_rfc3339();
@@ -1776,10 +1922,16 @@ fn record_api_usage(
             total.add(&row.tokens);
             total
         });
-    let _ = std::fs::write(
-        store.api_usage_path(),
-        serde_json::to_vec_pretty(&report).unwrap_or_default(),
-    );
+    // Stage and rename: a plain write truncates the live file first, so a quit or crash mid-write
+    // leaves unparsable JSON — which `read_api_usage` silently reads as an empty report, wiping
+    // the whole usage history on the next recorded request.
+    if let Ok(encoded) = serde_json::to_vec_pretty(&report) {
+        let path = store.api_usage_path();
+        let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &encoded).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
 }
 
 fn read_api_usage(store: &Store) -> ApiUsageReport {
@@ -2247,6 +2399,34 @@ impl StreamUsageSniffer {
                 &mut events,
             ));
         });
+        for event in &events {
+            self.recorder.observe_event(event);
+        }
+        out
+    }
+
+    /// Handle whatever is left buffered once the upstream closes. Providers don't reliably end the
+    /// last event with a newline, and dropping it loses the terminating envelope the client waits
+    /// for. Passthrough mode forwards the raw bytes itself, so it only needs the usage sniff.
+    fn finish(&mut self, translate: bool) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        let mut line = std::mem::take(&mut self.pending);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let line = String::from_utf8_lossy(&line).into_owned();
+        let mut events = Vec::new();
+        let out = if translate {
+            let model = self.model.clone();
+            translate_sse_line(&line, self.provider, self.client, &model, &mut events)
+        } else {
+            if let Some(value) = parse_sse_data_line(&line) {
+                events.push(value);
+            }
+            String::new()
+        };
         for event in &events {
             self.recorder.observe_event(event);
         }
@@ -3108,6 +3288,98 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         data.api_gateway.rotation_strategy = ApiRotationStrategy::FillFirst;
         let fill_first = select_member(&state, &data, &combo, "fill", &tried).unwrap();
         assert_eq!(fill_first.account.id, "a1");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An upstream that closes without a trailing newline still has its final event delivered.
+    /// In the Anthropic→Responses direction that last line is the `response.completed` envelope,
+    /// and losing it leaves the client waiting for a completion that never arrives.
+    #[test]
+    fn stream_finish_emits_the_last_line_without_a_trailing_newline() {
+        let root = std::env::temp_dir().join(format!("aisw-api-flush-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let member = SelectedMember {
+            tool_id: ToolId::Claude,
+            model: "claude-1".into(),
+            account: account(ToolId::Claude, "a1", 10.0),
+            key: account_key(&ToolId::Claude, "a1"),
+        };
+        let recorder =
+            UsageRecorder::new(&store, "combo", "key", &member, ClientProtocol::Anthropic);
+        let mut sniffer = StreamUsageSniffer::new(
+            ClientProtocol::Anthropic,
+            ClientProtocol::OpenAiResponses,
+            "claude-1".to_string(),
+            recorder,
+        );
+
+        // The final event arrives without its terminating newline.
+        let streamed = sniffer.push_translate(b"data: {\"type\":\"message_stop\"}");
+        assert!(
+            streamed.is_empty(),
+            "an unterminated line is still buffered, not emitted"
+        );
+
+        let flushed = sniffer.finish(true);
+        assert!(
+            flushed.contains("response.completed"),
+            "finish() must emit the buffered final event, got {flushed:?}"
+        );
+        assert!(
+            sniffer.finish(true).is_empty(),
+            "a second finish has nothing left to emit"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_key_comparison_rejects_wrong_and_short_keys() {
+        assert!(secret_matches(Some("sk-abcdef"), "sk-abcdef"));
+        assert!(!secret_matches(Some("sk-abcdef"), "sk-abcdeg"));
+        // A correct prefix must not pass, and neither must a longer key sharing the prefix.
+        assert!(!secret_matches(Some("sk-abcdef"), "sk-abc"));
+        assert!(!secret_matches(Some("sk-abc"), "sk-abcdef"));
+        assert!(!secret_matches(None, ""));
+        assert!(!secret_matches(Some("sk-abcdef"), ""));
+    }
+
+    /// One account serving both members of a combo is the usual "fall back to the cheaper model"
+    /// setup. A failure on the first model must still leave the second model reachable.
+    #[test]
+    fn combo_falls_back_to_the_next_model_on_the_same_account() {
+        let root = std::env::temp_dir().join(format!("aisw-api-combo-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let state = GatewayState {
+            store,
+            client: reqwest::Client::new(),
+            runtime: Mutex::new(GatewayRuntime::default()),
+        };
+        let mut data = StoredState::default();
+        data.api_gateway.quota_threshold = 95.0;
+        data.accounts = vec![account(ToolId::Claude, "a1", 20.0)];
+        data.api_gateway.model_registry = vec![registry(
+            ToolId::Claude,
+            "a1",
+            &["claude-opus", "claude-sonnet"],
+        )];
+        let combo = combo("smart", &["claude-opus", "claude-sonnet"]);
+        data.api_gateway.combos.push(combo.clone());
+        state.store.save(&data).unwrap();
+
+        let mut tried = HashSet::new();
+        let first = select_member(&state, &data, &combo, "s1", &tried).unwrap();
+        assert_eq!(first.model, "claude-opus");
+
+        // The first model failed for this account; the second member must still be offered.
+        tried.insert((first.key.clone(), first.model.clone()));
+        let second = select_member(&state, &data, &combo, "s1", &tried)
+            .expect("the account's other combo model should still be selectable");
+        assert_eq!(second.account.id, "a1");
+        assert_eq!(second.model, "claude-sonnet");
+
+        // Once both models of the only account are exhausted there is nothing left.
+        tried.insert((second.key.clone(), second.model.clone()));
+        assert!(select_member(&state, &data, &combo, "s1", &tried).is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

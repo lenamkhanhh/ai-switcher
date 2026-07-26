@@ -37,6 +37,19 @@ pub struct ManagedState {
     /// True while a prime batch is running, so the per-minute scheduler tick doesn't start a
     /// second overlapping batch (a single attempt can block for minutes on send retries).
     pub priming: std::sync::atomic::AtomicBool,
+    /// True while a Codex handoff is running. The handoff refreshes the account it just switched
+    /// to, and that refresh calls auto-switch again — without this one quota event would walk the
+    /// whole account list, switching and spawning a resume console for each.
+    pub codex_handoff_running: std::sync::atomic::AtomicBool,
+}
+
+/// Clears its flag however the guarded scope exits, including on `?`.
+struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl ManagedState {
@@ -57,6 +70,7 @@ impl ManagedState {
             codex_quota_watch: Mutex::new(BTreeMap::new()),
             codex_active_rollout: Mutex::new(None),
             priming: std::sync::atomic::AtomicBool::new(false),
+            codex_handoff_running: std::sync::atomic::AtomicBool::new(false),
         };
         // Clean up orphan active files: pointing to a deleted profile → clear + reinstall the hook.
         managed.heal_active_profiles();
@@ -1003,18 +1017,28 @@ impl ManagedState {
                     .codex_quota_watch
                     .lock()
                     .map_err(|_| anyhow::anyhow!("watch lock poisoned"))?;
-                let entry = guard.entry(key).or_insert(len);
+                let entry = guard.entry(key.clone()).or_insert(len);
                 if *entry > len {
                     *entry = 0;
                 }
-                let start = *entry;
-                *entry = len;
-                start
+                *entry
             };
-            if start == len {
+            if start >= len {
                 continue;
             }
-            let text = read_file_tail_from(&file, start)?;
+            // Read first, then advance the cursor by what was actually consumed. Committing `len`
+            // before the read dropped every byte the read couldn't return — a tail ending mid-line
+            // or mid-character was never looked at again, taking any quota error in it with it.
+            let (text, consumed) = match read_file_tail_from(&file, start) {
+                Ok(tail) => tail,
+                // One unreadable rollout (locked, rotated) must not abandon the others this pass.
+                Err(_) => continue,
+            };
+            if consumed > 0 {
+                if let Ok(mut guard) = self.codex_quota_watch.lock() {
+                    guard.insert(key, start + consumed);
+                }
+            }
             if text.lines().any(codex_quota_error_line) {
                 if let Ok(mut active) = self.codex_active_rollout.lock() {
                     *active = Some(file.clone());
@@ -2321,6 +2345,16 @@ impl ManagedState {
         app: Option<&AppHandle>,
     ) -> Result<bool> {
         use crate::models::{ResumeJob, ResumeJobStatus};
+        // Re-entered from the post-switch refresh below → the outer handoff is already handling
+        // this quota event.
+        if self
+            .codex_handoff_running
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(false);
+        }
+        let _handoff_guard = FlagGuard(&self.codex_handoff_running);
+
         let (current, event_key, used, explicit_quota_error) = {
             let data = self
                 .data
@@ -2421,7 +2455,12 @@ impl ManagedState {
                 updated_at: timestamp,
                 error: None,
             });
-            let selected = crate::seamless::select_candidate(&data.accounts, &current.id).cloned();
+            // A quota-number switch must move to an account with more headroom; a switch forced
+            // by a real quota error can't trust the numbers, so it takes the best available.
+            let must_improve_on = if explicit_quota_error { None } else { used };
+            let selected =
+                crate::seamless::select_candidate(&data.accounts, &current.id, must_improve_on)
+                    .cloned();
             if let Some(candidate) = &selected {
                 let job = data.resume_jobs.last_mut().expect("just pushed");
                 job.to_account_id = Some(candidate.id.clone());
@@ -3239,10 +3278,13 @@ impl ManagedState {
             if account.is_default {
                 anyhow::bail!("Can't delete the machine default account");
             }
-            (
-                account.launcher_command.clone(),
-                account.state == AccountState::Active,
-            )
+            // "In use" comes from the active file, NOT from `state == Active`: an account that hit
+            // its quota is still the one the plain command runs as, but its state is Exhausted.
+            // Reading state here would leave `active/<tool>.profile` pointing at a deleted dir.
+            let was_active = active_account_id_for(&self.store, &tool_id, &data.accounts)
+                .as_deref()
+                == Some(account_id.as_str());
+            (account.launcher_command.clone(), was_active)
         };
 
         delete_account_files(&tool_id, &self.store, &account_id)?;
@@ -3758,17 +3800,80 @@ fn rollout_files(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-fn read_file_tail_from(path: &std::path::Path, offset: u64) -> Result<String> {
+/// Most bytes taken from one rollout in a single watcher pass. Rollouts reach hundreds of
+/// megabytes; whatever is left over is picked up by the next poll.
+const MAX_TAIL_READ_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read the whole lines that follow `offset`, returning the text and how many bytes it covered.
+///
+/// The watcher polls while Codex is still writing, so the tail routinely ends in the middle of a
+/// line — and therefore in the middle of a multi-byte character. Decoding is lossy and the result
+/// is cut at the last newline so a split character can't fail the read, and the caller advances
+/// its cursor by the returned count rather than by the file length, so nothing is skipped.
+///
+/// An offset that starts mid-line (cursors are seeded from the file length) discards that partial
+/// first line: judging a fragment as if it were a complete record is how stale text gets misread.
+fn read_file_tail_from(path: &std::path::Path, offset: u64) -> Result<(String, u64)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;
+    let starts_mid_line = if offset > 0 {
+        file.seek(SeekFrom::Start(offset - 1))?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous)
+            .map(|()| previous[0] != b'\n')
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     file.seek(SeekFrom::Start(offset))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
+    let mut buffer = Vec::new();
+    (&mut file)
+        .take(MAX_TAIL_READ_BYTES as u64)
+        .read_to_end(&mut buffer)?;
+
+    let mut skipped = 0usize;
+    if starts_mid_line {
+        match buffer.iter().position(|byte| *byte == b'\n') {
+            Some(index) => skipped = index + 1,
+            // The partial line hasn't been finished yet — wait for the rest.
+            None => return Ok((String::new(), 0)),
+        }
+    }
+
+    let body = &buffer[skipped..];
+    let consumed = match body.iter().rposition(|byte| *byte == b'\n') {
+        Some(index) => index + 1,
+        // No line break yet: leave it for the next poll, unless the line is bigger than the whole
+        // window, in which case skip it so the watcher can't stall on the same bytes forever.
+        None if body.len() < MAX_TAIL_READ_BYTES => 0,
+        None => body.len(),
+    };
+    let text = String::from_utf8_lossy(&body[..consumed]).into_owned();
+    Ok((text, (skipped + consumed) as u64))
 }
 
 fn codex_quota_error_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let text = if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        let is_event = value.get("type").and_then(serde_json::Value::as_str) == Some("event_msg");
+        let Some(payload) = value.get("payload") else {
+            return false;
+        };
+        let event_type = payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let has_explicit_error = payload.get("error").is_some()
+            || payload.get("last_error").is_some()
+            || matches!(event_type, "error" | "turn_aborted");
+        if !is_event || !has_explicit_error {
+            return false;
+        }
+        payload.to_string()
+    } else {
+        line.to_string()
+    };
+    let lower = text.to_ascii_lowercase();
     (lower.contains("quota") || lower.contains("rate limit") || lower.contains("usage limit"))
         && (lower.contains("exceeded")
             || lower.contains("reached")
@@ -4282,14 +4387,27 @@ mod tests {
     #[test]
     fn detects_codex_quota_error_lines() {
         assert!(codex_quota_error_line(
-            r#"{"type":"event_msg","payload":{"message":"rate limit exceeded"}}"#
+            r#"{"type":"event_msg","payload":{"type":"error","message":"rate limit exceeded"}}"#
         ));
         assert!(codex_quota_error_line(
-            "usage limit reached for this account"
+            r#"{"type":"event_msg","payload":{"type":"turn_aborted","message":"usage limit reached for this account"}}"#
         ));
         assert!(codex_quota_error_line("HTTP 429 quota exhausted"));
         assert!(!codex_quota_error_line("refresh quota button clicked"));
         assert!(!codex_quota_error_line("normal assistant message"));
+    }
+
+    #[test]
+    fn ignores_quota_words_inside_new_chat_rollout_content() {
+        assert!(!codex_quota_error_line(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Create a new chat that explains rate limit exceeded handling"}]}}"#
+        ));
+        assert!(!codex_quota_error_line(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","output":"usage limit reached is mentioned in this document"}}"#
+        ));
+        assert!(!codex_quota_error_line(
+            r#"{"type":"event_msg","payload":{"type":"task_complete","message":"normal task complete; quota limit was discussed"}}"#
+        ));
     }
 
     #[test]
@@ -4466,6 +4584,96 @@ mod tests {
 
         assert!(!data.auto_ping_enabled);
         assert!(data.auto_ping.is_empty());
+    }
+
+    /// The watcher polls files Codex is still writing, so the tail regularly stops inside a line
+    /// and inside a multi-byte character. That must not fail the read or lose the bytes.
+    #[test]
+    fn tail_read_stops_at_line_boundaries_and_survives_split_characters() {
+        let root = std::env::temp_dir().join(format!("aisw-tail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout.jsonl");
+
+        let complete = "{\"a\":\"đầy đủ\"}\n";
+        let second = "{\"b\":\"chưa xong ề\"}\n";
+        // Write the second record only partially, cut inside the multi-byte 'ề'.
+        let split_at = second.find('ề').unwrap() + 1;
+        let mut bytes = complete.as_bytes().to_vec();
+        bytes.extend_from_slice(&second.as_bytes()[..split_at]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (text, consumed) = read_file_tail_from(&path, 0).unwrap();
+        assert_eq!(text, complete, "only the finished line should be returned");
+        assert_eq!(
+            consumed,
+            complete.len() as u64,
+            "the cursor must stop at the line break, not at the file length"
+        );
+
+        // Codex finishes writing the record: resuming from the committed cursor yields it whole.
+        std::fs::write(&path, format!("{complete}{second}")).unwrap();
+        let (text, consumed) = read_file_tail_from(&path, complete.len() as u64).unwrap();
+        assert_eq!(text, second);
+        assert_eq!(consumed as usize, second.len());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cursor seeded from the file length lands mid-line. That fragment is not a record and
+    /// must never be evaluated as one — judging fragments is how stale text reads as a live error.
+    #[test]
+    fn tail_read_discards_the_fragment_before_a_mid_line_offset() {
+        let root = std::env::temp_dir().join(format!("aisw-tail-mid-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout.jsonl");
+        let first = "you have hit your usage limit, quota exceeded\n";
+        let second = "{\"type\":\"plain\"}\n";
+        std::fs::write(&path, format!("{first}{second}")).unwrap();
+
+        // Start inside the first line, as a length-seeded cursor would.
+        let (text, consumed) = read_file_tail_from(&path, 10).unwrap();
+        assert_eq!(
+            text, second,
+            "the partial first line must be dropped, not returned"
+        );
+        assert!(!text.lines().any(codex_quota_error_line));
+        assert_eq!(consumed as usize, first.len() - 10 + second.len());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `delete_account` decides whether to clear `active/<tool>.profile` from this helper. An
+    /// account that ran out of quota is still the one the bare `codex` command runs as, so the
+    /// answer must not depend on the account's state.
+    #[test]
+    fn active_account_is_read_from_the_active_file_not_the_account_state() {
+        let root = std::env::temp_dir().join(format!("aisw-active-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let mut exhausted = test_account("a1", AccountState::Exhausted, 100.0);
+        exhausted.is_default = false;
+        let mut machine_default = test_account("default", AccountState::Active, 0.0);
+        machine_default.is_default = true;
+        let accounts = vec![exhausted, machine_default];
+
+        let profile_dir = store.account_dir(&ToolId::Codex, "a1");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let active_path = store.active_profile_path(&ToolId::Codex);
+        std::fs::create_dir_all(active_path.parent().unwrap()).unwrap();
+        std::fs::write(&active_path, profile_dir.to_string_lossy().as_bytes()).unwrap();
+
+        assert_eq!(
+            active_account_id_for(&store, &ToolId::Codex, &accounts).as_deref(),
+            Some("a1"),
+            "the exhausted account is still the one the plain command uses"
+        );
+
+        // With no active file the plain command falls back to the machine default.
+        std::fs::remove_file(&active_path).unwrap();
+        assert_eq!(
+            active_account_id_for(&store, &ToolId::Codex, &accounts).as_deref(),
+            Some("default")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn test_account(id: &str, state: AccountState, percent_used: f64) -> Account {

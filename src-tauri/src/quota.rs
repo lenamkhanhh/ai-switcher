@@ -672,14 +672,52 @@ fn codex_access_token_fresh_result(config_dir: &Path) -> Result<String> {
     value["last_refresh"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
     let encoded =
         serde_json::to_vec_pretty(&value).context("couldn't encode Codex authentication")?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, encoded).context("couldn't stage refreshed Codex authentication")?;
+    let temporary = path.with_extension(format!("json.tmp{}", std::process::id()));
+    std::fs::write(&temporary, &encoded)
+        .context("couldn't stage refreshed Codex authentication")?;
     let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
-    std::fs::rename(&temporary, &path).context("couldn't save refreshed Codex authentication")?;
+    persist_refreshed_auth(&temporary, &path, &encoded)?;
     if let Some(permissions) = permissions {
         let _ = std::fs::set_permissions(&path, permissions);
     }
     Ok(new_access)
+}
+
+/// Put the refreshed `auth.json` in place, retrying a locked file and finally writing in place.
+///
+/// The server has already rotated the refresh token by this point, so the copy on disk is dead. If
+/// this gives up, the next refresh replays the stale token, the server answers 400, and the account
+/// is forced back to "needs login" — a permanent logout caused by a momentary file lock (the Codex
+/// CLI or the VS Code app-server holding the file, or an antivirus scan).
+fn persist_refreshed_auth(
+    temporary: &Path,
+    path: &Path,
+    encoded: &[u8],
+) -> Result<(), anyhow::Error> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match std::fs::rename(temporary, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+            }
+        }
+    }
+    // Renaming onto the file keeps failing (Windows refuses to replace an open file). Overwriting
+    // the existing handle's contents usually still works, and losing the rotated token is worse
+    // than a non-atomic write here.
+    match std::fs::write(path, encoded) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temporary);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temporary);
+            Err(anyhow::Error::from(last_error.unwrap_or(error)))
+                .context("couldn't save refreshed Codex authentication")
+        }
+    }
 }
 
 fn jwt_expiry(token: &str) -> Option<i64> {
@@ -801,13 +839,36 @@ fn latest_codex_rate_limits(sessions: &Path) -> Result<serde_json::Value> {
 
     // Limit the number of files read so a single refresh doesn't scan thousands of old sessions.
     for (path, _) in files.into_iter().take(40) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = read_rollout_tail(&path) {
             if let Some(limits) = last_rate_limits_in(&text) {
                 return Ok(limits);
             }
         }
     }
     anyhow::bail!("no codex rate_limits found")
+}
+
+/// The newest `rate_limits` snapshot is at the end of a rollout, and rollouts reach hundreds of
+/// megabytes — read only the tail instead of pulling whole files into memory.
+fn read_rollout_tail(path: &Path) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 4 * 1024 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    // Lossy: the cut can land inside a multi-byte character. The leading partial line is dropped
+    // so it can't be parsed as a record.
+    let text = String::from_utf8_lossy(&buffer).into_owned();
+    if start == 0 {
+        return Ok(text);
+    }
+    Ok(match text.find('\n') {
+        Some(index) => text[index + 1..].to_string(),
+        None => String::new(),
+    })
 }
 
 fn collect_jsonl_files(dir: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
@@ -1164,5 +1225,26 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("Authorization"));
         assert!(!text.contains("secret-token"));
+    }
+
+    /// The rotated refresh token must reach disk even when the atomic rename can't be used,
+    /// otherwise the next refresh replays a dead token and the account is logged out for good.
+    #[test]
+    fn refreshed_auth_is_persisted_even_when_rename_is_impossible() {
+        let root =
+            std::env::temp_dir().join(format!("aisw-auth-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("auth.json");
+        std::fs::write(&path, b"{\"tokens\":{\"refresh_token\":\"old\"}}").unwrap();
+        let encoded = b"{\"tokens\":{\"refresh_token\":\"rotated\"}}".to_vec();
+
+        // A staging file that does not exist makes every rename attempt fail, standing in for a
+        // locked destination.
+        let missing_temporary = root.join("auth.json.tmp-does-not-exist");
+        persist_refreshed_auth(&missing_temporary, &path, &encoded).unwrap();
+
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written, encoded, "the rotated token must not be dropped");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -49,6 +49,16 @@ fn default_threshold() -> f64 {
     92.0
 }
 
+/// Serializes every write to `state.json` inside this process.
+static STATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_state_writes() -> std::sync::MutexGuard<'static, ()> {
+    // A previous writer panicking mid-save must not make the state file permanently unwritable.
+    STATE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Default for StoredState {
     fn default() -> Self {
         Self {
@@ -161,20 +171,60 @@ impl Store {
             .join("auth.missing")
     }
 
+    /// Copy of the last successfully written state, used to recover if `state.json` is left
+    /// truncated or spliced by a crash.
+    pub fn state_backup_path(&self) -> PathBuf {
+        self.root.join("state.json.bak")
+    }
+
     pub fn load(&self) -> Result<StoredState> {
         let path = self.state_path();
         if !path.exists() {
             return Ok(StoredState::default());
         }
-        let text = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&text)?)
+        let text = fs::read_to_string(&path)?;
+        match serde_json::from_str(&text) {
+            Ok(state) => Ok(state),
+            Err(error) => fs::read_to_string(self.state_backup_path())
+                .ok()
+                .and_then(|backup| serde_json::from_str(&backup).ok())
+                .ok_or(error)
+                .context("state.json is unreadable and the backup can't be used either"),
+        }
     }
 
     pub fn save(&self, state: &StoredState) -> Result<()> {
+        let _guard = lock_state_writes();
+        self.write_state(state)
+    }
+
+    /// Load, mutate and save while holding the write lock, so two threads can't each read the
+    /// same state, apply a different change, and have one silently overwrite the other. The API
+    /// gateway persists account state from its own workers without the app's state mutex, so
+    /// plain `load` + `save` there would lose updates.
+    pub fn update<F>(&self, mutate: F) -> Result<StoredState>
+    where
+        F: FnOnce(&mut StoredState),
+    {
+        let _guard = lock_state_writes();
+        let mut data = self.load()?;
+        mutate(&mut data);
+        self.write_state(&data)?;
+        Ok(data)
+    }
+
+    /// Caller must hold the state write lock.
+    fn write_state(&self, state: &StoredState) -> Result<()> {
         let path = self.state_path();
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
-        fs::rename(tmp, path)?;
+        let encoded = serde_json::to_vec_pretty(state)?;
+        // Process-unique staging file: a shared fixed name lets a second writer truncate and
+        // refill the file we are about to rename into place.
+        let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+        fs::write(&tmp, &encoded)?;
+        if path.exists() {
+            let _ = fs::copy(&path, self.state_backup_path());
+        }
+        fs::rename(&tmp, &path)?;
         Ok(())
     }
 
@@ -203,5 +253,82 @@ pub fn normalize_account_states(
         } else {
             account.state.clone()
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_store(name: &str) -> Store {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aisw-store-{name}-{unique}"));
+        Store::for_test(root).unwrap()
+    }
+
+    /// A crash mid-write must not cost the user every account: the previous good state is kept
+    /// alongside and used when `state.json` no longer parses.
+    #[test]
+    fn corrupt_state_falls_back_to_the_last_good_copy() {
+        let store = temp_store("corrupt");
+        let mut data = StoredState::default();
+        data.disclaimer_accepted = true;
+        store.save(&data).unwrap();
+        // A second save is what creates the backup of the first.
+        data.auto_switch = true;
+        store.save(&data).unwrap();
+
+        // Simulate a save that was interrupted after truncating the file.
+        fs::write(store.state_path(), b"{\"disclaimerAccepted\": tr").unwrap();
+
+        let recovered = store.load().expect("should recover from the backup");
+        assert!(recovered.disclaimer_accepted);
+        let _ = fs::remove_dir_all(store.root_dir());
+    }
+
+    #[test]
+    fn update_applies_and_persists_the_mutation() {
+        let store = temp_store("update");
+        store.save(&StoredState::default()).unwrap();
+
+        let returned = store
+            .update(|data| {
+                data.auto_switch_threshold = 77.0;
+            })
+            .unwrap();
+
+        assert_eq!(returned.auto_switch_threshold, 77.0);
+        assert_eq!(store.load().unwrap().auto_switch_threshold, 77.0);
+        let _ = fs::remove_dir_all(store.root_dir());
+    }
+
+    /// Two threads saving at once must never publish a spliced file.
+    #[test]
+    fn concurrent_saves_always_leave_parsable_state() {
+        let store = temp_store("concurrent");
+        store.save(&StoredState::default()).unwrap();
+        let root = store.root_dir().to_path_buf();
+
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let store = Store::for_test(root.clone()).unwrap();
+                scope.spawn(move || {
+                    for round in 0..25 {
+                        let _ = store.update(|data| {
+                            data.auto_switch_threshold = f64::from(worker * 100 + round);
+                            data.accounts.clear();
+                        });
+                        assert!(store.load().is_ok(), "state.json must always parse");
+                    }
+                });
+            }
+        });
+
+        assert!(store.load().is_ok());
+        let _ = fs::remove_dir_all(&root);
     }
 }
