@@ -210,6 +210,18 @@ pub fn sync_codex_ide_credentials(
     }
 
     let target_auth = if target_is_default {
+        // Returning to (or, on every app start, staying on) the machine default. If the live
+        // `~/.codex/auth.json` already holds the machine-default account, the CLI/IDE may have
+        // rotated its tokens since the backup was taken — restoring the backup here would roll
+        // those away and eventually force a re-login. Keep the live file and refresh the backup
+        // from it instead; only fall back to the backup when the live file belongs to a different
+        // (profile) account that must be swapped out.
+        let backup_account = codex_auth_account_id(&machine_backup);
+        let live_account = codex_auth_account_id(&default_auth);
+        if live_account.is_some() && live_account == backup_account {
+            save_machine_default_codex_auth(store, &default_auth)?;
+            return Ok(());
+        }
         machine_backup
     } else {
         store
@@ -310,13 +322,19 @@ $code = Get-Process Code | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Main
 if ($code) {
   Add-Type -AssemblyName Microsoft.VisualBasic
   Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -Namespace Aisw -Name Fg -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
   [Microsoft.VisualBasic.Interaction]::AppActivate($code.Id) | Out-Null
   Start-Sleep -Milliseconds 350
-  [System.Windows.Forms.SendKeys]::SendWait('^+p')
-  Start-Sleep -Milliseconds 350
-  [System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')
-  Start-Sleep -Milliseconds 150
-  [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  # Only send keys if VS Code actually came to the foreground. The Windows foreground lock denies
+  # a background/tray process from stealing focus, and blindly sending '^+p' + text then typed the
+  # command into whatever app the user was actually using (Slack, a terminal, etc.).
+  if ([Aisw.Fg]::GetForegroundWindow() -eq $code.MainWindowHandle) {
+    [System.Windows.Forms.SendKeys]::SendWait('^+p')
+    Start-Sleep -Milliseconds 350
+    [System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')
+    Start-Sleep -Milliseconds 150
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  }
 }
 
 $chat = Get-Process ChatGPT | Where-Object { $_.Path -like '*OpenAI.Codex_*' } | Select-Object -First 1
@@ -357,12 +375,17 @@ $ErrorActionPreference = 'SilentlyContinue'
 Start-Sleep -Seconds 4
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -Namespace Aisw -Name Fg -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
 $p = Get-Process -Id {pid}
 if ($p -and $p.MainWindowHandle -ne 0) {{
   [Microsoft.VisualBasic.Interaction]::AppActivate($p.Id) | Out-Null
   Start-Sleep -Milliseconds 250
-  [System.Windows.Forms.SendKeys]::SendWait('/app')
-  [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
+  # Only type into the resume TUI if it actually became foreground; otherwise the keystrokes land
+  # in whatever window the user is currently focused on.
+  if ([Aisw.Fg]::GetForegroundWindow() -eq $p.MainWindowHandle) {{
+    [System.Windows.Forms.SendKeys]::SendWait('/app')
+    [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
+  }}
 }}
 "#
         );
@@ -487,6 +510,44 @@ mod codex_ide_credential_tests {
         assert_eq!(
             fs::read(default_dir.join("auth.json")).unwrap(),
             auth("machine", "machine-token")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// On every app start the heal runs with the machine default selected. If the live default
+    /// file still belongs to the machine-default account, its rotated tokens must be kept (and
+    /// captured into the backup), never rolled back to a stale backup.
+    #[test]
+    fn staying_on_default_keeps_rotated_tokens_and_refreshes_the_backup() {
+        let root = temp_root("codex-ide-rotate");
+        let store = Store::for_test(root.clone()).unwrap();
+        let default_dir = root.join("default");
+        fs::create_dir_all(&default_dir).unwrap();
+        fs::create_dir_all(store.codex_machine_default_auth_backup().parent().unwrap()).unwrap();
+        // An older backup for the same machine account…
+        fs::write(
+            store.codex_machine_default_auth_backup(),
+            auth("machine", "old-token"),
+        )
+        .unwrap();
+        // …and the live file the CLI has since rotated to a new token.
+        fs::write(
+            default_dir.join("auth.json"),
+            auth("machine", "rotated-token"),
+        )
+        .unwrap();
+
+        sync_codex_ide_credentials(&store, "default-codex", true, &default_dir).unwrap();
+
+        assert_eq!(
+            fs::read(default_dir.join("auth.json")).unwrap(),
+            auth("machine", "rotated-token"),
+            "the rotated live token must be kept, not overwritten by the stale backup"
+        );
+        assert_eq!(
+            fs::read(store.codex_machine_default_auth_backup()).unwrap(),
+            auth("machine", "rotated-token"),
+            "the backup must be refreshed from the live file"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -1743,14 +1804,121 @@ aisw | Out-Null\n\
     )
 }
 
+/// Documents folders PowerShell might load `$PROFILE` from, most-likely first. OneDrive Known
+/// Folder Move (default-on for many Windows setups) relocates Documents under the OneDrive folder,
+/// so the plain `~/Documents` is often NOT where PowerShell looks.
+fn documents_roots() -> Vec<PathBuf> {
+    let home = home_dir();
+    let mut roots = Vec::new();
+    if let Ok(entries) = fs::read_dir(&home) {
+        for entry in entries.flatten() {
+            // Matches both "OneDrive" (personal) and "OneDrive - <Org>" (commercial).
+            if entry.file_name().to_string_lossy().starts_with("OneDrive") {
+                let docs = entry.path().join("Documents");
+                if docs.is_dir() {
+                    roots.push(docs);
+                }
+            }
+        }
+    }
+    roots.push(home.join("Documents"));
+    roots
+}
+
 fn powershell_profile_paths() -> Vec<PathBuf> {
-    let docs = home_dir().join("Documents");
-    vec![
-        docs.join("PowerShell")
-            .join("Microsoft.PowerShell_profile.ps1"),
-        docs.join("WindowsPowerShell")
-            .join("Microsoft.PowerShell_profile.ps1"),
-    ]
+    let roots = documents_roots();
+    let mut out = Vec::new();
+    for host in ["PowerShell", "WindowsPowerShell"] {
+        // Prefer an existing profile — that's the exact file PowerShell loads. Writing our hook to
+        // a ~/Documents path that OneDrive has redirected away means new shells never see it and
+        // account switching silently never affects the bare `codex`/`claude` commands.
+        let existing = roots
+            .iter()
+            .map(|root| root.join(host).join("Microsoft.PowerShell_profile.ps1"))
+            .find(|path| path.exists());
+        if let Some(path) = existing {
+            out.push(path);
+            continue;
+        }
+        // None exists yet: create it under the real (first existing) Documents root, OneDrive first.
+        let target_root = roots
+            .iter()
+            .find(|root| root.is_dir())
+            .cloned()
+            .unwrap_or_else(|| home_dir().join("Documents"));
+        out.push(target_root.join(host).join("Microsoft.PowerShell_profile.ps1"));
+    }
+    out
+}
+
+/// How an existing rc/profile file was encoded, so it can be written back the same way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+/// Decode an rc/profile file, honouring the BOM. Windows PowerShell 5.1 writes `$PROFILE` as
+/// UTF-16LE by default (`"..." > $PROFILE`, the ISE), which is not valid UTF-8 — reading such a
+/// file as UTF-8 and falling back to an empty string would make `upsert_block` overwrite the
+/// user's entire profile with just our hook.
+fn decode_text_file(bytes: &[u8]) -> Option<(String, TextEncoding)> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8(bytes[3..].to_vec())
+            .ok()
+            .map(|text| (text, TextEncoding::Utf8Bom));
+    }
+    for (bom, encoding) in [
+        ([0xFF, 0xFE], TextEncoding::Utf16Le),
+        ([0xFE, 0xFF], TextEncoding::Utf16Be),
+    ] {
+        if bytes.starts_with(&bom) {
+            let body = &bytes[2..];
+            if body.len() % 2 != 0 {
+                return None;
+            }
+            let units: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|pair| match encoding {
+                    TextEncoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
+                    _ => u16::from_be_bytes([pair[0], pair[1]]),
+                })
+                .collect();
+            return String::from_utf16(&units).ok().map(|text| (text, encoding));
+        }
+    }
+    String::from_utf8(bytes.to_vec())
+        .ok()
+        .map(|text| (text, TextEncoding::Utf8))
+}
+
+fn encode_text_file(text: &str, encoding: TextEncoding) -> Vec<u8> {
+    match encoding {
+        TextEncoding::Utf8 => text.as_bytes().to_vec(),
+        TextEncoding::Utf8Bom => {
+            let mut out = vec![0xEF, 0xBB, 0xBF];
+            out.extend_from_slice(text.as_bytes());
+            out
+        }
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be => {
+            let mut out = if encoding == TextEncoding::Utf16Le {
+                vec![0xFF, 0xFE]
+            } else {
+                vec![0xFE, 0xFF]
+            };
+            for unit in text.encode_utf16() {
+                let pair = if encoding == TextEncoding::Utf16Le {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                };
+                out.extend_from_slice(&pair);
+            }
+            out
+        }
+    }
 }
 
 /// Replace the block between the markers (if present) or append; create the file if it doesn't exist.
@@ -1758,7 +1926,18 @@ fn upsert_block(rc: &Path, block: &str) -> Result<()> {
     if let Some(parent) = rc.parent() {
         fs::create_dir_all(parent)?;
     }
-    let current = fs::read_to_string(rc).unwrap_or_default();
+    let existing = fs::read(rc).ok();
+    let (current, encoding) = match existing {
+        Some(bytes) if !bytes.is_empty() => decode_text_file(&bytes).with_context(|| {
+            // Refuse rather than replace: the file holds the user's aliases, prompt and module
+            // imports, and there is no backup to restore from.
+            format!(
+                "Couldn't read {} as text, so it was left untouched",
+                rc.display()
+            )
+        })?,
+        _ => (String::new(), TextEncoding::Utf8),
+    };
     let next = if let (Some(start), Some(end)) = (current.find(HOOK_BEGIN), current.find(HOOK_END))
     {
         let end = end + HOOK_END.len();
@@ -1776,7 +1955,7 @@ fn upsert_block(rc: &Path, block: &str) -> Result<()> {
         out.push_str(block);
         out
     };
-    fs::write(rc, next)?;
+    fs::write(rc, encode_text_file(&next, encoding))?;
     Ok(())
 }
 
@@ -2499,5 +2678,79 @@ mod shared_link_tests {
         );
         assert_eq!(fs::read(&link).unwrap(), b"model = \"default\"");
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod shell_hook_encoding_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aisw-hook-{name}-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("Microsoft.PowerShell_profile.ps1")
+    }
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out
+    }
+
+    /// Windows PowerShell 5.1 writes `$PROFILE` as UTF-16LE. Appending the hook must keep every
+    /// line the user had, not replace the file with just our block.
+    #[test]
+    fn utf16_profile_keeps_user_content_and_encoding() {
+        let path = temp_file("utf16");
+        let original = "Set-Alias ll Get-ChildItem\r\nImport-Module posh-git\r\n";
+        fs::write(&path, utf16le(original)).unwrap();
+
+        upsert_block(&path, "# hook body\n").unwrap();
+
+        let written = fs::read(&path).unwrap();
+        assert_eq!(&written[..2], &[0xFF, 0xFE], "encoding must be preserved");
+        let (text, _) = decode_text_file(&written).unwrap();
+        assert!(
+            text.contains("Set-Alias ll Get-ChildItem"),
+            "user content was destroyed: {text:?}"
+        );
+        assert!(text.contains("Import-Module posh-git"));
+        assert!(text.contains("# hook body"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn utf8_profile_round_trips_and_replaces_an_existing_block() {
+        let path = temp_file("utf8");
+        let original = format!("Set-Alias g git\n\n{HOOK_BEGIN}\nold body\n{HOOK_END}\ntrailing\n");
+        fs::write(&path, original.as_bytes()).unwrap();
+
+        upsert_block(&path, &format!("{HOOK_BEGIN}\nnew body\n{HOOK_END}\n")).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("Set-Alias g git"));
+        assert!(text.contains("new body"));
+        assert!(!text.contains("old body"));
+        assert!(text.contains("trailing"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Undecodable content must be left exactly as it was rather than overwritten.
+    #[test]
+    fn undecodable_profile_is_left_untouched() {
+        let path = temp_file("binary");
+        let original = vec![0x00, 0xFF, 0xFE_u8, 0x80, 0x81];
+        fs::write(&path, &original).unwrap();
+
+        assert!(upsert_block(&path, "# hook body\n").is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

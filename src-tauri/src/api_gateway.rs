@@ -56,6 +56,18 @@ impl ApiServerHandle {
     }
 }
 
+/// The upstream HTTP client. `reqwest::Client::new()` applies no timeout of any kind, so a
+/// black-holed upstream (SYN accepted, no response) would hang a request forever with no failover.
+/// A whole-request `.timeout()` can't be used because proxied streams are long-lived; instead bound
+/// connection setup and the gap between received bytes, which a healthy slow stream never hits.
+fn build_upstream_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 struct GatewayState {
     store: Store,
     client: reqwest::Client,
@@ -96,7 +108,7 @@ pub fn start_server(store: Store, config: ApiGatewayConfig) -> Result<ApiServerH
     runtime.cooldowns = restore_cooldowns(&store);
     let state = GatewayState {
         store,
-        client: reqwest::Client::new(),
+        client: build_upstream_client(),
         runtime: Mutex::new(runtime),
     };
     let app = Router::new()
@@ -123,11 +135,25 @@ pub fn start_server(store: Store, config: ApiGatewayConfig) -> Result<ApiServerH
             Err(_) => return,
         };
         runtime.block_on(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
+            let (grace_tx, grace_rx) = oneshot::channel::<()>();
+            let server = std::future::IntoFuture::into_future(
+                axum::serve(listener, app).with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
-                })
-                .await;
+                    // Tell the drain-timer below that shutdown has started.
+                    let _ = grace_tx.send(());
+                }),
+            );
+            tokio::pin!(server);
+            // `stop()` joins this thread on the UI thread, so the graceful drain — which otherwise
+            // waits with no deadline for every in-flight (possibly hung) SSE stream — must be
+            // bounded, or clicking Stop / quitting freezes the app until every stream ends.
+            tokio::select! {
+                _ = &mut server => {}
+                _ = async {
+                    let _ = grace_rx.await;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                } => {}
+            }
         });
     });
 
@@ -841,6 +867,57 @@ fn should_retry_upstream(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
+/// Convert one OpenAI-chat message into the Responses `input` item(s) it maps to.
+///
+/// Copying chat messages verbatim breaks any tool-using turn: the Responses API rejects the
+/// chat-only shapes `role:"tool"` (result), an assistant message carrying `tool_calls`, and
+/// content parts of `type:"text"`. They must become `function_call_output`, `function_call`, and
+/// `input_text` items respectively.
+fn chat_message_to_responses_items(message: &Value) -> Vec<Value> {
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+    let mut items = Vec::new();
+
+    // A tool result: `{role:"tool", tool_call_id, content}` → function_call_output.
+    if role == "tool" {
+        items.push(json!({
+            "type": "function_call_output",
+            "call_id": message.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
+            "output": message.get("content").cloned().unwrap_or(Value::String(String::new())),
+        }));
+        return items;
+    }
+
+    // Assistant tool calls → one function_call item each (preserving order relative to any text).
+    let text = message_text(message);
+    if !text.is_empty() {
+        // Chat content parts are `{type:"text"}`; Responses input parts are `input_text`.
+        items.push(json!({
+            "role": role,
+            "content": [{"type": "input_text", "text": text}],
+        }));
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in tool_calls {
+            let function = call.get("function").unwrap_or(call);
+            items.push(json!({
+                "type": "function_call",
+                "call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                "name": function.get("name").and_then(Value::as_str).unwrap_or(""),
+                "arguments": function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_string(),
+            }));
+        }
+    }
+
+    // A message with neither text nor tool calls (e.g. an assistant turn that was only tool
+    // calls with empty content already handled above) contributes nothing rather than an empty
+    // item the API would reject.
+    items
+}
+
 fn openai_chat_to_responses(mut body: Value) -> Value {
     // Hoist any system messages into the required top-level `instructions`; the rest become `input`.
     let mut instructions = Vec::new();
@@ -857,7 +934,7 @@ fn openai_chat_to_responses(mut body: Value) -> Value {
                 instructions.push(text);
             }
         } else {
-            input.push(message);
+            input.extend(chat_message_to_responses_items(&message));
         }
     }
     // Chat tools are `{type:"function", function:{name, parameters}}`; the Responses API wants the
@@ -1005,11 +1082,20 @@ fn openai_responses_to_anthropic(body: Value) -> Value {
                             "content": item.get("output").cloned().unwrap_or(Value::String(String::new()))
                         }]
                     })),
+                    // `reasoning` items (and any other non-message item) have no role and no text.
+                    // Codex replays them on every turn when store:false; turning them into
+                    // `{role:"user", content:""}` makes Anthropic 400 ("all messages must have
+                    // non-empty content"), so drop anything that yields no text.
+                    Some("reasoning") => {}
                     _ => {
+                        let text = message_text(item);
+                        if text.is_empty() {
+                            continue;
+                        }
                         let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
                         messages.push(json!({
                             "role": if role == "assistant" { "assistant" } else { "user" },
-                            "content": message_text(item)
+                            "content": text
                         }));
                     }
                 }
@@ -2338,6 +2424,25 @@ struct StreamUsageSniffer {
     client: ClientProtocol,
     model: String,
     recorder: UsageRecorder,
+    translate_state: StreamTranslateState,
+}
+
+/// A tool call being assembled across `content_block_start` → `input_json_delta`s →
+/// `content_block_stop`, so the closing event can carry the full arguments.
+#[derive(Default)]
+struct ToolBlockAccum {
+    call_id: Value,
+    name: Value,
+    args: String,
+}
+
+/// Per-stream state the Anthropic→Responses translation needs but a single event can't supply:
+/// which content-block indices are tool calls (and their accumulated arguments), and the usage
+/// Anthropic reports on `message_delta` rather than on the closing event.
+#[derive(Default)]
+struct StreamTranslateState {
+    tool_blocks: HashMap<u64, ToolBlockAccum>,
+    usage: Option<Value>,
 }
 
 impl StreamUsageSniffer {
@@ -2353,6 +2458,7 @@ impl StreamUsageSniffer {
             client,
             model,
             recorder,
+            translate_state: StreamTranslateState::default(),
         }
     }
 
@@ -2390,15 +2496,24 @@ impl StreamUsageSniffer {
         let model = self.model.clone();
         let mut out = String::new();
         let mut events = Vec::new();
-        self.for_each_line(chunk, |line| {
+        let state = &mut self.translate_state;
+        self.pending.extend_from_slice(chunk);
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut raw = self.pending.drain(..=newline).collect::<Vec<_>>();
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+            let line = String::from_utf8_lossy(&raw);
             out.push_str(&translate_sse_line(
-                line,
+                &line,
                 provider,
                 client,
                 &model,
                 &mut events,
+                state,
             ));
-        });
+        }
         for event in &events {
             self.recorder.observe_event(event);
         }
@@ -2420,7 +2535,14 @@ impl StreamUsageSniffer {
         let mut events = Vec::new();
         let out = if translate {
             let model = self.model.clone();
-            translate_sse_line(&line, self.provider, self.client, &model, &mut events)
+            translate_sse_line(
+                &line,
+                self.provider,
+                self.client,
+                &model,
+                &mut events,
+                &mut self.translate_state,
+            )
         } else {
             if let Some(value) = parse_sse_data_line(&line) {
                 events.push(value);
@@ -2450,6 +2572,7 @@ fn translate_sse_line(
     client: ClientProtocol,
     model: &str,
     seen_events: &mut Vec<Value>,
+    state: &mut StreamTranslateState,
 ) -> String {
     let mut out = String::new();
     {
@@ -2473,15 +2596,132 @@ fn translate_sse_line(
         if stream_event_usage(&value).is_some() {
             seen_events.push(value.clone());
         }
+        // Anthropic→Responses needs cross-event state to finish tool calls: a single content_block
+        // event can't produce the terminating `function_call_arguments.done` / `output_item.done`
+        // the Codex CLI executes tools from, and Anthropic reports usage on message_delta, not on
+        // message_stop where the closing envelope is built.
+        let mut extra = Vec::new();
+        if provider == ClientProtocol::Anthropic && client == ClientProtocol::OpenAiResponses {
+            extra = track_anthropic_tool_stream(&value, state);
+        }
         for translated in translate_stream_event(value, provider, client, model) {
+            let translated = augment_completed_usage(translated, state);
             if !translated.is_null() {
                 out.push_str("data: ");
                 out.push_str(&translated.to_string());
                 out.push_str("\n\n");
             }
         }
+        // The tool-completion events are emitted AFTER the base translation of the same line
+        // (content_block_stop translates to nothing on its own), and BEFORE the later message_stop
+        // envelope, matching the order Codex expects.
+        for event in extra {
+            out.push_str("data: ");
+            out.push_str(&event.to_string());
+            out.push_str("\n\n");
+        }
     }
     out
+}
+
+/// Track Anthropic tool-call blocks so the closing `content_block_stop` can emit the finalized
+/// `response.function_call_arguments.done` + `response.output_item.done` pair. Also captures usage
+/// off `message_delta`/`message_start` into `state`. Returns any events to append after the base
+/// translation of this line.
+fn track_anthropic_tool_stream(value: &Value, state: &mut StreamTranslateState) -> Vec<Value> {
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if let Some(usage) = value.pointer("/usage").filter(|u| !u.is_null()) {
+        // Merge output_tokens (message_delta) onto input_tokens (message_start).
+        match state.usage.as_mut() {
+            Some(existing) => {
+                if let (Some(existing), Some(new)) = (existing.as_object_mut(), usage.as_object()) {
+                    for (key, val) in new {
+                        existing.insert(key.clone(), val.clone());
+                    }
+                }
+            }
+            None => state.usage = Some(usage.clone()),
+        }
+    }
+    match event_type {
+        "content_block_start"
+            if value.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") =>
+        {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+            state.tool_blocks.insert(
+                index,
+                ToolBlockAccum {
+                    call_id: value
+                        .pointer("/content_block/id")
+                        .cloned()
+                        .unwrap_or(Value::String(String::new())),
+                    name: value
+                        .pointer("/content_block/name")
+                        .cloned()
+                        .unwrap_or(Value::String(String::new())),
+                    args: String::new(),
+                },
+            );
+            Vec::new()
+        }
+        "content_block_delta"
+            if value.pointer("/delta/type").and_then(Value::as_str) == Some("input_json_delta") =>
+        {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(block) = state.tool_blocks.get_mut(&index) {
+                if let Some(fragment) = value.pointer("/delta/partial_json").and_then(Value::as_str)
+                {
+                    block.args.push_str(fragment);
+                }
+            }
+            Vec::new()
+        }
+        "content_block_stop" => {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+            match state.tool_blocks.remove(&index) {
+                Some(block) => vec![
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "output_index": index,
+                        "arguments": block.args,
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": {
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": block.call_id,
+                            "name": block.name,
+                            "arguments": block.args,
+                        },
+                    }),
+                ],
+                None => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Fill in the usage on a `response.completed` envelope built from an Anthropic `message_stop`
+/// (which has no usage of its own) with the usage captured earlier from `message_delta`.
+fn augment_completed_usage(mut event: Value, state: &StreamTranslateState) -> Value {
+    if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+        let usage_null = event
+            .pointer("/response/usage")
+            .map(Value::is_null)
+            .unwrap_or(true);
+        if usage_null {
+            if let (Some(usage), Some(response)) = (
+                state.usage.as_ref(),
+                event.get_mut("response").and_then(Value::as_object_mut),
+            ) {
+                response.insert("usage".to_string(), usage.clone());
+            }
+        }
+    }
+    event
 }
 
 /// Translate one upstream SSE event into zero-or-more client-protocol events. Most map 1:1, but the
@@ -2549,6 +2789,17 @@ fn translate_stream_event(
     }
     if let Some(event) = translate_terminal_stream_event(&value, provider, client, model) {
         return vec![event];
+    }
+    // A Responses upstream emits the visible answer ONLY as `response.output_text.delta`. Every
+    // other `response.*` event must be dropped here: `response.output_text.done` repeats the whole
+    // answer in a top-level `text` field (which the generic extractor below would forward as one
+    // final chunk, duplicating the message), and `response.reasoning_summary_text.delta` /
+    // `response.reasoning_text.delta` carry `delta` strings that would leak reasoning into the
+    // visible content.
+    if provider == ClientProtocol::OpenAiResponses
+        && value.get("type").and_then(Value::as_str) != Some("response.output_text.delta")
+    {
+        return vec![];
     }
     let text = stream_delta_text(&value);
     if text.is_empty() {
@@ -3043,6 +3294,94 @@ mod tests {
         )
     }
 
+    /// A Codex (Responses) upstream re-sends the whole answer in `response.output_text.done` and
+    /// emits reasoning deltas. Neither may reach a chat client: the first would duplicate the
+    /// message, the second would leak reasoning into the visible content.
+    #[test]
+    fn responses_stream_drops_output_text_done_and_reasoning() {
+        let (mut sniffer, root) =
+            test_sniffer(ClientProtocol::OpenAiResponses, ClientProtocol::OpenAiChat);
+        let sse = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking...\"}\n",
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello world\"}\n",
+        );
+        let out = sniffer.push_translate(sse.as_bytes());
+
+        assert!(out.contains("Hello"), "the incremental delta must be forwarded");
+        assert!(
+            !out.contains("Hello world"),
+            "output_text.done must not re-emit the full answer: {out}"
+        );
+        assert!(
+            !out.contains("thinking"),
+            "reasoning must not leak into visible content: {out}"
+        );
+        // Exactly one visible content chunk (the delta), no duplicate from .done.
+        assert_eq!(
+            out.matches("chat.completion.chunk").count(),
+            1,
+            "expected a single content chunk, got: {out}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Claude account serving a Codex CLI client: a tool call must be finalized with
+    /// `function_call_arguments.done` + `output_item.done` (carrying the full arguments), or the
+    /// CLI never executes it; and `response.completed` must carry the usage Anthropic reported on
+    /// message_delta, not the null from message_stop.
+    #[test]
+    fn anthropic_to_responses_stream_completes_tool_calls_and_usage() {
+        let (mut sniffer, root) =
+            test_sniffer(ClientProtocol::Anthropic, ClientProtocol::OpenAiResponses);
+        let out = sniffer.push_translate(
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":50}}}\n\n",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_9\",\"name\":\"get_weather\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Hanoi\\\"}\"}}\n\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+                "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":12}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n"
+            )
+            .as_bytes(),
+        );
+
+        assert!(
+            out.contains("response.function_call_arguments.done"),
+            "tool arguments must be finalized: {out}"
+        );
+        assert!(
+            out.contains("response.output_item.done"),
+            "the function_call item must be closed: {out}"
+        );
+        // The finalized arguments must be the full accumulated JSON.
+        assert!(out.contains("{\\\"city\\\":\\\"Hanoi\\\"}"), "got: {out}");
+        assert!(out.contains("toolu_9"));
+        // response.completed must carry the message_delta usage, not null.
+        assert!(out.contains("\"output_tokens\":12"), "usage missing: {out}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Codex replays `reasoning` items on every turn. Translating them to empty Anthropic messages
+    /// makes Anthropic 400, breaking multi-turn Codex→Claude conversations from turn 2.
+    #[test]
+    fn responses_reasoning_items_do_not_become_empty_anthropic_messages() {
+        let out = openai_responses_to_anthropic(json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}], "encrypted_content": "xyz"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}
+            ]
+        }));
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "the reasoning item must be dropped: {messages:?}");
+        assert!(messages.iter().all(|m| {
+            m["content"].as_str().map(|s| !s.is_empty()).unwrap_or(true)
+        }), "no empty-content message may reach Anthropic: {messages:?}");
+    }
+
     #[test]
     fn sse_translator_buffers_split_json_lines() {
         let (mut sniffer, root) =
@@ -3404,6 +3743,45 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         assert_eq!(anth["content"][0]["text"], "Hi there");
         assert_eq!(anth["type"], "message");
         assert_eq!(anth["usage"]["input_tokens"], 23);
+    }
+
+    /// A tool round-trip must survive translation: the assistant's tool_calls and the client's
+    /// role:"tool" result have to become Responses `function_call` / `function_call_output` items,
+    /// and text parts become `input_text`. Verbatim copies are rejected by the Responses API.
+    #[test]
+    fn openai_chat_to_responses_translates_tool_round_trip() {
+        let out = openai_chat_to_responses(json!({
+            "model": "gpt-5.5-codex",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "weather?"}]},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\":\"Hanoi\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ]
+        }));
+        let input = out["input"].as_array().unwrap();
+
+        // user text part → input_text
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "weather?");
+
+        // assistant tool_calls → function_call (no raw tool_calls field leaks through)
+        let fc = input.iter().find(|i| i["type"] == "function_call").unwrap();
+        assert_eq!(fc["call_id"], "call_1");
+        assert_eq!(fc["name"], "get_weather");
+        assert_eq!(fc["arguments"], "{\"city\":\"Hanoi\"}");
+
+        // tool result → function_call_output
+        let fco = input.iter().find(|i| i["type"] == "function_call_output").unwrap();
+        assert_eq!(fco["call_id"], "call_1");
+        assert_eq!(fco["output"], "sunny");
+
+        // No message must carry the chat-only `tool_calls` field or `role:"tool"`.
+        assert!(input.iter().all(|i| i.get("tool_calls").is_none()));
+        assert!(input.iter().all(|i| i["role"] != "tool"));
     }
 
     #[test]
