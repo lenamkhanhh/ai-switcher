@@ -7,7 +7,6 @@ use crate::tools::{
     binary_candidate_names, command_name, common_bin_dirs, default_config_dir,
     default_startup_integration_mode, home_dir, is_our_launcher,
 };
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -484,28 +483,9 @@ fn path_in_path_env(path: &Path) -> bool {
 }
 
 fn claude_credential_exists(config_dir: &Path) -> bool {
-    let suffix = claude_keychain_suffix(config_dir);
-    keychain_service_exists(&format!("Claude Code-credentials-{suffix}"))
-        || config_dir.join(".credentials.json").exists()
-}
-
-fn claude_keychain_suffix(config_dir: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(config_dir.to_string_lossy().as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .take(4)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn keychain_service_exists(service: &str) -> bool {
-    Command::new("security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .output()
-        .map(|out| out.status.success() && !out.stdout.is_empty())
-        .unwrap_or(false)
+    // One source of truth for "does this Claude config dir have a usable credential" — checks the
+    // macOS Keychain and the `.credentials.json` file used on Windows/Linux.
+    crate::quota::claude_has_credentials(config_dir)
 }
 
 fn codex_auth_valid(path: &Path) -> bool {

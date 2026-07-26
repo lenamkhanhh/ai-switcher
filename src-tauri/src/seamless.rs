@@ -72,23 +72,6 @@ pub fn select_candidate<'a>(
     eligible.into_iter().next()
 }
 
-pub fn can_transition(from: &ResumeJobStatus, to: &ResumeJobStatus) -> bool {
-    use ResumeJobStatus::*;
-    matches!(
-        (from, to),
-        (Queued, Checkpointed)
-            | (Queued, Cancelled)
-            | (Queued, Failed)
-            | (Checkpointed, Switching)
-            | (Checkpointed, Cancelled)
-            | (Checkpointed, Failed)
-            | (Switching, Resumed)
-            | (Switching, Failed)
-            | (Failed, Queued)
-            | (Failed, Cancelled)
-    )
-}
-
 pub fn is_duplicate(jobs: &[ResumeJob], session_id: &str, event_key: &str) -> bool {
     jobs.iter().any(|job| {
         job.session_id == session_id
@@ -149,22 +132,6 @@ pub fn spawn_exact_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resumed_jobs_cannot_run_again() {
-        assert!(!can_transition(
-            &ResumeJobStatus::Resumed,
-            &ResumeJobStatus::Queued
-        ));
-    }
-
-    #[test]
-    fn failed_jobs_can_be_retried() {
-        assert!(can_transition(
-            &ResumeJobStatus::Failed,
-            &ResumeJobStatus::Queued
-        ));
-    }
 
     #[test]
     fn threshold_requires_92_percent_and_idle() {

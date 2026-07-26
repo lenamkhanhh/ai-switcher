@@ -49,14 +49,6 @@ pub fn read_quota(tool_id: &ToolId, config_dir: &Path) -> QuotaInfo {
 static CLAUDE_CACHE: Mutex<BTreeMap<String, (Instant, QuotaInfo)>> = Mutex::new(BTreeMap::new());
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Drop the cached Claude quota for one config dir so the next `read_quota` re-fetches.
-/// Auto-prime's confirmation re-check needs the fresh `resets_at` right after sending "hi",
-/// which the 60s cache would otherwise mask.
-pub(crate) fn invalidate_claude_cache(config_dir: &Path) {
-    if let Ok(mut guard) = CLAUDE_CACHE.lock() {
-        guard.remove(&config_dir.to_string_lossy().to_string());
-    }
-}
 
 fn read_claude_quota(config_dir: &Path) -> Result<QuotaInfo> {
     let cache_key = config_dir.to_string_lossy().to_string();
@@ -228,6 +220,13 @@ pub fn claude_keychain_suffix(config_dir: &Path) -> String {
 /// ONLY when it is the default dir `~/.claude`: try the old global keychain name (compatible
 /// with very old versions). Do NOT fall back to the global one for a profile dir, to avoid reading
 /// the wrong account's token.
+/// Whether a Claude account has a usable credential for this config dir. Uses the same
+/// keychain→`.credentials.json` fallback as reading the token, so it is correct on Windows/Linux
+/// (no OS keychain → the credential is the profile's `.credentials.json` file) as well as macOS.
+pub fn claude_has_credentials(config_dir: &Path) -> bool {
+    claude_credentials_blob(config_dir).is_some()
+}
+
 fn claude_credentials_blob(config_dir: &Path) -> Option<String> {
     let suffix = claude_keychain_suffix(config_dir);
     if let Some(blob) = read_keychain_blob(&format!("Claude Code-credentials-{suffix}")) {
@@ -564,24 +563,6 @@ fn read_codex_rollout_quota() -> Result<QuotaInfo> {
 /// `<config_dir>/auth.json` (`tokens.access_token`). Returns rate_limit.primary_window
 /// (5h, limit_window_seconds 18000) + secondary_window (weekly, 604800), each with
 /// `used_percent` + `reset_at` (unix seconds).
-/// Read the LIVE 5-hour window for one account, bypassing any cache or local rollout file.
-/// Auto-prime's confirmation step needs the truth straight from the provider right after
-/// sending "hi" — the Claude cache (60s) or the Codex rollout file (only updated by the CLI)
-/// would otherwise return a stale `reset_at`.
-pub(crate) fn read_live_five_hour(tool_id: &ToolId, config_dir: &Path) -> Option<QuotaWindow> {
-    match tool_id {
-        ToolId::Claude => {
-            invalidate_claude_cache(config_dir);
-            let quota = read_claude_quota(config_dir).ok()?;
-            Some(quota.five_hour)
-        }
-        ToolId::Codex => {
-            let quota = read_codex_usage_endpoint(config_dir).ok()?;
-            Some(quota.five_hour)
-        }
-        ToolId::Antigravity => None,
-    }
-}
 
 fn read_codex_usage_endpoint(config_dir: &Path) -> Result<QuotaInfo> {
     let token = codex_access_token_fresh_result(config_dir)?;
@@ -1109,6 +1090,34 @@ mod tests {
             Some("2026-06-05T03:00:00.033953+00:00")
         );
         assert!(quota.error.is_none());
+    }
+
+    /// On Windows/Linux there is no OS keychain, so a Claude account's credential is the
+    /// profile's `.credentials.json`. `claude_has_credentials` must recognize it — otherwise a
+    /// finished login is never confirmed and the account stays stuck in NeedsLogin.
+    #[test]
+    fn claude_has_credentials_detects_the_credentials_file() {
+        let root = std::env::temp_dir().join(format!(
+            "aisw-claude-cred-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            !claude_has_credentials(&root),
+            "an empty profile dir has no credential"
+        );
+
+        std::fs::write(
+            root.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":9999999999999}}"#,
+        )
+        .unwrap();
+        assert!(
+            claude_has_credentials(&root),
+            "a profile with .credentials.json must count as logged in"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

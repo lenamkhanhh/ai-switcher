@@ -1336,23 +1336,15 @@ pub fn launch_profile_login(
 /// Used for the background poll after opening the Terminal login.
 pub fn profile_has_credentials(tool_id: &ToolId, config_dir: &Path) -> bool {
     match tool_id {
-        ToolId::Claude => {
-            let suffix = crate::quota::claude_keychain_suffix(config_dir);
-            keychain_service_exists(&format!("Claude Code-credentials-{suffix}"))
-        }
+        // macOS keeps the token in the Keychain; Windows/Linux keep it in the profile's
+        // `.credentials.json`. `claude_has_credentials` checks both — a keychain-only check here
+        // left every Claude profile stuck in NeedsLogin on Windows.
+        ToolId::Claude => crate::quota::claude_has_credentials(config_dir),
         // Codex stores the token in a file inside CODEX_HOME.
         ToolId::Codex => codex_has_fresh_reauth(config_dir),
         // Antigravity IDE: the token lives in the account's own userData state.vscdb.
         ToolId::Antigravity => antigravity_logged_in(config_dir),
     }
-}
-
-fn keychain_service_exists(service: &str) -> bool {
-    Command::new("security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .output()
-        .map(|out| out.status.success() && !out.stdout.is_empty())
-        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1962,8 +1954,10 @@ fn upsert_block(rc: &Path, block: &str) -> Result<()> {
 pub fn delete_account_files(tool_id: &ToolId, store: &Store, account_id: &str) -> Result<()> {
     let account_dir = store.account_dir(tool_id, account_id);
 
-    // Claude stores the keychain token by the config dir's hash → delete it too so no
-    // orphaned credential remains after deleting the account.
+    // On macOS Claude stores the token in the Keychain (keyed by the config dir's hash) → delete
+    // it too so no orphaned credential remains. On Windows/Linux the token is the profile's
+    // `.credentials.json`, removed with the account dir below, and there is no `security` binary.
+    #[cfg(target_os = "macos")]
     if matches!(tool_id, ToolId::Claude) {
         let suffix = crate::quota::claude_keychain_suffix(&account_dir);
         let _ = Command::new("security")

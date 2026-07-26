@@ -118,25 +118,15 @@ impl Store {
         self.root.join("api_usage.json")
     }
 
-    /// Human-readable activity log for auto session priming (one line per event).
-    pub fn auto_prime_log_path(&self) -> PathBuf {
-        self.root.join("auto-prime.log")
-    }
-
     /// Best-effort Codex handoff prompts generated after auto-switches.
     pub fn handoff_dir(&self) -> PathBuf {
         self.root.join("handoffs")
     }
 
-    /// The root data dir (used to place the pmset wake helper's request/script files).
+    /// The root data dir. Only used by tests (to clean their temp store).
+    #[cfg(test)]
     pub fn root_dir(&self) -> &std::path::Path {
         &self.root
-    }
-
-    /// File the app writes the next desired wake time into; the root LaunchDaemon helper watches
-    /// it and runs `pmset schedule wake`. Lives in the data dir so the unprivileged app can write it.
-    pub fn wake_request_path(&self) -> PathBuf {
-        self.root.join("wake-request.txt")
     }
 
     /// The tool's accounts root (`accounts/<tool>/`), holding one dir per profile account.

@@ -1744,13 +1744,16 @@ async fn translate_response(
                             },
                         };
 
-                        let out = match chunk {
+                        let out: Bytes = match chunk {
                             Some(bytes) => {
                                 if translate {
-                                    sniffer.push_translate(&bytes)
+                                    Bytes::from(sniffer.push_translate(&bytes))
                                 } else {
+                                    // Passthrough: sniff usage but forward the RAW bytes unchanged.
+                                    // Decoding each network chunk with from_utf8_lossy corrupted any
+                                    // multi-byte character that straddled a chunk boundary (→ U+FFFD).
                                     sniffer.push_passthrough(&bytes);
-                                    String::from_utf8_lossy(&bytes).into_owned()
+                                    bytes
                                 }
                             }
                             None if !flushed => {
@@ -1759,7 +1762,7 @@ async fn translate_response(
                                 // buffer and the client never sees it — in the Anthropic→
                                 // Responses direction that is the `response.completed` envelope.
                                 flushed = true;
-                                sniffer.finish(translate)
+                                Bytes::from(sniffer.finish(translate))
                             }
                             None => return None,
                         };
@@ -1773,7 +1776,7 @@ async fn translate_response(
                             continue;
                         }
                         return Some((
-                            Ok::<_, std::io::Error>(Bytes::from(out)),
+                            Ok::<_, std::io::Error>(out),
                             (prefix, upstream, sniffer, ended, flushed),
                         ));
                     }

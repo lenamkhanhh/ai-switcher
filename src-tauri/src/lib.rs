@@ -1,26 +1,23 @@
 mod api_gateway;
 mod app_state;
-mod auto_ping;
 mod detection;
 mod handoff;
 mod models;
 mod pricing;
-mod prime;
 mod quota;
 mod seamless;
 mod store;
 mod tools;
 mod tray;
 mod usage;
-mod wake;
 
 use app_state::ManagedState;
 use models::{
-    AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, ConfirmExtendInput,
+    AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot,
     CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
     DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport, RenameAccountInput,
-    SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetAutoExtendInput, SetAutoPrimeAllInput,
-    SetAutoPrimeInput, SetLauncherInput, SetToolSetupInput, StartApiGatewayInput,
+    SaveApiGatewayComboInput, SetApiGatewayAccountInput,
+    SetLauncherInput, SetToolSetupInput, StartApiGatewayInput,
     SwitchAccountInput, ToolId, UsageReport,
 };
 use tauri::{Emitter, Manager, State};
@@ -197,102 +194,6 @@ fn set_launch_with_windows(app: tauri::AppHandle, enabled: bool) -> Result<AppSn
     app.state::<ManagedState>()
         .set_launch_with_windows(enabled)
         .map_err(display_error)
-}
-
-#[tauri::command]
-fn set_auto_prime(
-    state: State<'_, ManagedState>,
-    input: SetAutoPrimeInput,
-) -> Result<AppSnapshot, String> {
-    state
-        .set_auto_prime(input.tool_id, input.account_id, input.enabled, input.time)
-        .map_err(display_error)
-}
-
-#[tauri::command]
-fn set_auto_prime_all(
-    state: State<'_, ManagedState>,
-    input: SetAutoPrimeAllInput,
-) -> Result<AppSnapshot, String> {
-    state
-        .set_auto_prime_all(input.time, input.enabled)
-        .map_err(display_error)
-}
-
-#[tauri::command]
-fn confirm_extend(
-    state: State<'_, ManagedState>,
-    input: ConfirmExtendInput,
-) -> Result<AppSnapshot, String> {
-    state
-        .confirm_extend(input.tool_id, input.account_id, input.accept)
-        .map_err(display_error)
-}
-
-#[tauri::command]
-fn set_auto_extend(
-    state: State<'_, ManagedState>,
-    input: SetAutoExtendInput,
-) -> Result<AppSnapshot, String> {
-    state
-        .set_auto_extend(input.tool_id, input.account_id, input.enabled)
-        .map_err(display_error)
-}
-
-#[tauri::command]
-fn get_auto_prime_log(state: State<'_, ManagedState>) -> String {
-    state.auto_prime_log()
-}
-
-#[tauri::command]
-fn get_auto_prime_stats(state: State<'_, ManagedState>) -> Vec<models::AutoPrimeDayStat> {
-    state.auto_prime_stats(14)
-}
-
-/// Whether the pmset wake helper LaunchDaemon is installed (so the Mac can wake itself to prime).
-#[tauri::command]
-fn wake_helper_status() -> bool {
-    wake::helper_installed()
-}
-
-/// Install the root LaunchDaemon (one admin prompt) + write the first wake request.
-#[tauri::command]
-fn install_wake_helper(state: State<'_, ManagedState>) -> Result<bool, String> {
-    wake::install_helper(&state.store).map_err(|e| e.to_string())?;
-    state.update_wake_schedule();
-    Ok(true)
-}
-
-/// Remove the root LaunchDaemon (one admin prompt).
-#[tauri::command]
-fn uninstall_wake_helper() -> Result<bool, String> {
-    wake::uninstall_helper().map_err(|e| e.to_string())?;
-    Ok(false)
-}
-
-#[tauri::command]
-fn open_auto_prime_log(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    let path = app.state::<ManagedState>().store.auto_prime_log_path();
-    // Ensure the file exists so the OS has something to open.
-    if !path.exists() {
-        let _ = std::fs::write(&path, "");
-    }
-    app.opener()
-        .open_path(path.to_string_lossy().to_string(), None::<String>)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn open_auto_prime_log_folder(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    let path = app.state::<ManagedState>().store.auto_prime_log_path();
-    if !path.exists() {
-        let _ = std::fs::write(&path, "");
-    }
-    app.opener()
-        .reveal_item_in_dir(path)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

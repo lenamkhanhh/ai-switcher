@@ -45,14 +45,6 @@ impl ToolId {
         }
     }
 
-    /// Short label used in auto-prime log/notification lines (matches the brainstorm wording).
-    pub fn prime_label(&self) -> &'static str {
-        match self {
-            ToolId::Claude => "Claude",
-            ToolId::Codex => "Codex",
-            ToolId::Antigravity => "Antigravity",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -524,12 +516,6 @@ impl Default for AutoPingSetting {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAutoPingInput {
-    pub account_id: String,
-    pub enabled: bool,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -610,71 +596,6 @@ impl Default for AutoPrimeSetting {
             extend_dismissed_reset: None,
         }
     }
-}
-
-/// One day's tally of auto-prime outcomes, parsed from the activity log for the stats view.
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoPrimeDayStat {
-    /// Local date `YYYY-MM-DD`.
-    pub date: String,
-    pub success: u32,
-    pub failed: u32,
-    pub hold: u32,
-    pub skip: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAutoPrimeInput {
-    pub tool_id: ToolId,
-    pub account_id: String,
-    pub enabled: bool,
-    /// `HH:MM` 24h local time.
-    pub time: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAutoPrimeAllInput {
-    /// `HH:MM` 24h applied to every prime-eligible (subscription) account.
-    pub time: String,
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfirmExtendInput {
-    pub tool_id: ToolId,
-    pub account_id: String,
-    /// true = user accepted "extend?"; false = user dismissed it.
-    pub accept: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAutoExtendInput {
-    pub tool_id: ToolId,
-    pub account_id: String,
-    /// true = auto-extend without asking; false = ask each time (default).
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrimeNowInput {
-    pub tool_id: ToolId,
-    pub account_id: String,
-}
-
-/// Result of an on-demand "Prime ngay": a short message plus a kind the UI maps to a toast colour.
-/// `success` = a new window opened; `info` = nothing wrong but no new window (the old one is still
-/// running — a Hold); `error` = an actual failure (no token / send failed / unconfirmed).
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrimeNowResult {
-    pub kind: String,
-    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

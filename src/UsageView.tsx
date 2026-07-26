@@ -202,7 +202,10 @@ function UsageInsights({ daily, range }: { daily: DayUsage[]; range: number }) {
     (best, day) => (!best || total(day.tokens) > total(best.tokens) ? day : best),
     null,
   );
-  const streaks = calculateStreaks(calendar);
+  // Streaks are a property of the whole history, not the selected range: computing them on the
+  // range-limited calendar caps the longest streak at the window length (e.g. 7) and truncates the
+  // current streak. Peak/token totals below stay range-scoped, which is correct.
+  const streaks = calculateStreaks(continuousDays(daily, 0));
   const rangeLabel = range === 0 ? "all time" : `${range}d`;
 
   return (

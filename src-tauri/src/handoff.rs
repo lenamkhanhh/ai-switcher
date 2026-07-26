@@ -40,17 +40,6 @@ pub struct RolloutCheckpoint {
     pub created_at: String,
 }
 
-pub fn latest_codex_checkpoint(
-    codex_config_dir: &Path,
-    handoff_dir: &Path,
-    previous_account: &str,
-) -> Result<Option<(RolloutCheckpoint, PathBuf)>> {
-    let Some(file) = latest_rollout_file(&codex_config_dir.join("sessions")) else {
-        return Ok(None);
-    };
-    checkpoint_from_rollout(&file, handoff_dir, previous_account)
-}
-
 pub fn checkpoint_from_rollout(
     file: &Path,
     handoff_dir: &Path,

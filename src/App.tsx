@@ -429,10 +429,6 @@ export function App() {
       ) ?? [],
     [currentTool],
   );
-  const isWindowsCodexOnly =
-    snapshot.tools.length === 1 &&
-    snapshot.tools[0]?.id === "codex" &&
-    snapshot.tools[0]?.platform === "windows";
   const currentAutoSwitch = currentTool
     ? snapshot.autoSwitchSettings[currentTool.id] ?? {
         enabled: snapshot.autoSwitch,
@@ -445,12 +441,6 @@ export function App() {
       setSelectedTool(currentTool.id);
     }
   }, [currentTool, selectedTool]);
-
-  useEffect(() => {
-    if (isWindowsCodexOnly && view === "api") {
-      setView("accounts");
-    }
-  }, [isWindowsCodexOnly, view]);
 
   // Switching tool tab → clear the previous tool's switch notice (a Claude notice
   // must not leak onto Codex/Antigravity).
@@ -689,24 +679,22 @@ export function App() {
                 </span>
               </button>
             ))}
-            {!isWindowsCodexOnly && (
-              <button
-                aria-current={view === "api" ? "page" : undefined}
-                className={`toolTab ${view === "api" ? "selected" : ""}`}
-                onClick={() => setView("api")}
-              >
-                <span className="sidebarNavIcon" aria-hidden>
-                  <Server />
-                </span>
-                <span className="sidebarNavCopy">
-                  <strong>API</strong>
-                  <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
-                </span>
-                <span className="sidebarNavIndex" aria-hidden>
-                  {String(snapshot.tools.length + 1).padStart(2, "0")}
-                </span>
-              </button>
-            )}
+            <button
+              aria-current={view === "api" ? "page" : undefined}
+              className={`toolTab ${view === "api" ? "selected" : ""}`}
+              onClick={() => setView("api")}
+            >
+              <span className="sidebarNavIcon" aria-hidden>
+                <Server />
+              </span>
+              <span className="sidebarNavCopy">
+                <strong>API</strong>
+                <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
+              </span>
+              <span className="sidebarNavIndex" aria-hidden>
+                {String(snapshot.tools.length + 1).padStart(2, "0")}
+              </span>
+            </button>
             <button
               aria-current={view === "usage" ? "page" : undefined}
               className={`toolTab ${view === "usage" ? "selected" : ""}`}
@@ -720,7 +708,7 @@ export function App() {
                 <small>Token &amp; cost</small>
               </span>
               <span className="sidebarNavIndex" aria-hidden>
-                {String(snapshot.tools.length + (isWindowsCodexOnly ? 1 : 2)).padStart(2, "0")}
+                {String(snapshot.tools.length + 2).padStart(2, "0")}
               </span>
             </button>
             <button
@@ -736,7 +724,7 @@ export function App() {
                 <small>CLI paths</small>
               </span>
               <span className="sidebarNavIndex" aria-hidden>
-                {String(snapshot.tools.length + (isWindowsCodexOnly ? 2 : 3)).padStart(2, "0")}
+                {String(snapshot.tools.length + 3).padStart(2, "0")}
               </span>
             </button>
           </div>
@@ -758,7 +746,7 @@ export function App() {
 
         {view === "usage" && <UsageView />}
 
-        {!isWindowsCodexOnly && view === "api" && (
+        {view === "api" && (
           <ApiGatewayView
             snapshot={snapshot}
             busy={busy !== null}
@@ -2374,6 +2362,13 @@ function AddDialog({
   const [model, setModel] = useState("");
   const [bypass, setBypass] = useState(false);
 
+  // Forget models fetched from a now-edited gateway so the picker + submitted model can't drift
+  // out of sync with the URL/key.
+  const resetFetchedModels = () => {
+    setModels([]);
+    setModel("");
+  };
+
   const fetchModels = async () => {
     if (!baseUrl.trim().startsWith("https://")) {
       setMessage("Gateway URL must start with https://");
@@ -2531,7 +2526,12 @@ function AddDialog({
               Gateway URL
               <input
                 value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
+                onChange={(event) => {
+                  setBaseUrl(event.target.value);
+                  // The fetched models belong to the previous gateway; drop them so a stale model
+                  // can't be submitted against a URL it doesn't serve. A re-fetch is required.
+                  resetFetchedModels();
+                }}
                 placeholder="https://your-gateway.com/v1"
               />
             </label>
@@ -2540,7 +2540,10 @@ function AddDialog({
               <input
                 type="password"
                 value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
+                onChange={(event) => {
+                  setApiKey(event.target.value);
+                  resetFetchedModels();
+                }}
                 placeholder="sk-…"
               />
             </label>
