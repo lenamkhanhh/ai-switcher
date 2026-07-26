@@ -3001,7 +3001,7 @@ button.danger:hover:not(:disabled) {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- Japanese noir unified shell ---------- */
+/* ---------- Japanese noir integrated shell ---------- */
 :root {
   --bg-window: #08090a;
   --bg-sidebar: rgba(8, 9, 10, 0.94);
@@ -3031,26 +3031,47 @@ button.danger:hover:not(:disabled) {
   font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
 }
 
-.shell { padding: 0 22px 22px; }
-.topbar { background: #08090a; border-bottom-color: rgba(222, 207, 180, 0.1); }
+.shell {
+  background:
+    linear-gradient(90deg, rgba(3, 4, 5, 0.5) 0%, rgba(5, 6, 7, 0.24) 48%, rgba(7, 8, 9, 0.46) 100%),
+    linear-gradient(180deg, rgba(2, 3, 4, 0.18), rgba(5, 6, 7, 0.52)),
+    url("./assets/japanese-noir-canvas.png") center / cover no-repeat fixed,
+    #08090a;
+  padding: 0 22px 22px;
+  position: relative;
+}
+.shell::before {
+  background:
+    radial-gradient(900px 540px at 76% 22%, rgba(122, 28, 28, 0.07), transparent 66%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.16), transparent 36%, rgba(0, 0, 0, 0.2));
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+.topbar, .notice, .autoBanner, .loginPromptPanel, .workspace { position: relative; z-index: 1; }
+.topbar { backdrop-filter: blur(8px); background: rgba(5, 6, 7, 0.28); border-bottom-color: rgba(222, 207, 180, 0.1); }
 .workspace {
   gap: 0;
   grid-template-columns: 292px minmax(0, 1fr);
-  background: linear-gradient(90deg, rgba(8, 9, 10, 0.98) 0 292px, rgba(13, 15, 16, 0.96) 292px), #08090a;
-  border: 1px solid rgba(222, 207, 180, 0.13);
-  border-radius: 18px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 237, 200, 0.04);
+  background: linear-gradient(90deg, rgba(6, 7, 8, 0.08), rgba(6, 7, 8, 0.02) 56%, rgba(6, 7, 8, 0.12));
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   overflow: hidden;
 }
 .sidebar {
-  background: linear-gradient(180deg, rgba(8, 9, 10, 0.34), rgba(8, 9, 10, 0.66)), url("./assets/sidebar-yoru-lane.png") left bottom / cover no-repeat, #08090a;
+  background: linear-gradient(90deg, rgba(4, 5, 6, 0.62), rgba(7, 8, 9, 0.18));
   border: 0;
-  border-right: 1px solid rgba(222, 207, 180, 0.16);
+  border-right: 0;
   border-radius: 0;
   box-shadow: none;
 }
 .sidebar::before {
-  background: radial-gradient(420px 320px at 16% 80%, rgba(164, 31, 34, 0.12), transparent 66%), linear-gradient(180deg, rgba(8, 9, 10, 0.1) 0%, rgba(8, 9, 10, 0.34) 26%, rgba(8, 9, 10, 0.67) 58%, rgba(8, 9, 10, 0.86) 100%), linear-gradient(90deg, rgba(8, 9, 10, 0.04), rgba(8, 9, 10, 0.78) 96%);
+  background: linear-gradient(180deg, rgba(3, 4, 5, 0.5), rgba(4, 5, 6, 0.78)), url("./assets/sidebar-noir-atmosphere.png") left 58% / auto 138% no-repeat;
+  mask-image: linear-gradient(90deg, #000 0%, rgba(0, 0, 0, 0.92) 36%, rgba(0, 0, 0, 0.18) 82%, transparent 100%);
+  opacity: 0.48;
   content: "";
   inset: 0;
   pointer-events: none;
@@ -3058,11 +3079,10 @@ button.danger:hover:not(:disabled) {
   z-index: 0;
 }
 .sidebar::after {
-  background: radial-gradient(240px 160px at 0% 0%, rgba(255, 237, 200, 0.04), transparent 75%), repeating-radial-gradient(circle at 12% 18%, transparent 0 2px, rgba(255, 255, 255, 0.012) 3px 4px);
+  background: linear-gradient(90deg, rgba(3, 4, 5, 0.24), rgba(5, 6, 7, 0.68) 96%), repeating-radial-gradient(circle at 12% 18%, transparent 0 2px, rgba(255, 255, 255, 0.009) 3px 4px);
   content: "";
   inset: 0;
-  mix-blend-mode: screen;
-  opacity: 0.55;
+  opacity: 0.76;
   pointer-events: none;
   position: absolute;
   z-index: 1;
@@ -3081,20 +3101,20 @@ button.danger:hover:not(:disabled) {
 .sidebarNavCopy small { color: #91897f; font-size: 11.5px; }
 .sidebarNavIndex { align-self: center; color: #a59b8c; font-size: 11px; min-width: 20px; }
 .toolTab:hover:not(.selected) { background: rgba(17, 13, 12, 0.26); }
-.sidebar .toolTab.selected, .sidebar .toolTab.selected:hover:not(:disabled) { background: linear-gradient(90deg, rgba(95, 27, 25, 0.28), rgba(20, 14, 13, 0.08)); border: 0; box-shadow: none; }
-.toolTab.selected::before { background: #e34e4b; border-radius: 0; content: ""; height: 100%; left: 0; position: absolute; top: 0; width: 2px; }
-.toolTab.selected .sidebarNavIcon { color: #ead7b5; }
-.toolTab.selected .sidebarNavCopy strong { color: #fff1dc; }
-.toolTab.selected .sidebarNavCopy small { color: #c0a986; }
-.toolTab.selected .sidebarNavCopy::after { background: linear-gradient(90deg, rgba(224, 191, 132, 0.84), transparent); height: 1px; margin-top: 7px; width: 76px; }
-.toolTab.selected .sidebarNavIndex { color: #e3c27e; }
+.sidebar .toolTab.selected, .sidebar .toolTab.selected:hover:not(:disabled) { background: transparent; border: 0; box-shadow: none; }
+.toolTab.selected::before { background: #a72d2b; border-radius: 0; content: ""; height: 62%; left: 0; position: absolute; top: 19%; width: 2px; }
+.toolTab.selected .sidebarNavIcon { color: #c8bcaa; }
+.toolTab.selected .sidebarNavCopy strong { color: #d9d0c3; }
+.toolTab.selected .sidebarNavCopy small { color: #91897f; }
+.toolTab.selected .sidebarNavCopy::after { content: none; }
+.toolTab.selected .sidebarNavIndex { color: #a59b8c; }
 .toolTab.selected .sidebarNavIndex::after { content: none; }
 .sidebarEtching { bottom: 70px; opacity: 0.045; }
 .sidebarEtching img { filter: grayscale(1) sepia(0.16) contrast(0.76); height: 150px; width: 150px; }
 .sidebarFoot { border-top-color: rgba(224, 215, 200, 0.14); justify-content: flex-start; margin: 0 24px; padding: 14px 0 18px; }
 .sidebarCredit { color: #a29a90; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-size: 10.5px; }
 .sidebarCredit::before { background: #d94b48; border-radius: 50%; content: ""; display: inline-block; height: 6px; margin-right: 8px; width: 6px; }
-.panel { background: rgba(13, 15, 16, 0.96); border: 0; border-radius: 0; box-shadow: none; padding: 24px 24px 28px; }
+.panel { background: linear-gradient(90deg, rgba(7, 9, 10, 0.52), rgba(7, 9, 10, 0.28) 44%, rgba(7, 9, 10, 0.38)); border: 0; border-radius: 0; box-shadow: inset 18px 0 38px -38px rgba(230, 213, 184, 0.3); padding: 24px 24px 28px; }
 .titleRow h2 { font-family: Georgia, "Times New Roman", serif; font-size: 25px; font-weight: 500; letter-spacing: -0.015em; }
 .actions > button:first-of-type { border-color: rgba(217, 75, 72, 0.48); background: rgba(30, 13, 13, 0.54); }
 .actions > button:first-of-type:hover:not(:disabled) { background: rgba(75, 24, 22, 0.42); border-color: rgba(229, 88, 84, 0.72); }
