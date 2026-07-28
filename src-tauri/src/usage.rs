@@ -16,6 +16,7 @@
 
 use crate::models::{
     DayUsage, ModelUsage, SessionUsage, TokenBreakdown, ToolId, ToolUsage, UsageReport,
+    UsageReports,
 };
 use crate::pricing::{load_price_table, PriceTable};
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,25 @@ pub fn build_report(
     codex_dirs: &[PathBuf],
     range_days: u32,
 ) -> UsageReport {
+    build_reports(
+        cache_path,
+        price_cache_path,
+        claude_dirs,
+        codex_dirs,
+        range_days,
+    )
+    .report
+}
+
+/// Refresh the incremental log cache once, then derive both the selected-range report and the
+/// all-time activity source from the same in-memory data.
+pub fn build_reports(
+    cache_path: &Path,
+    price_cache_path: &Path,
+    claude_dirs: &[PathBuf],
+    codex_dirs: &[PathBuf],
+    range_days: u32,
+) -> UsageReports {
     let mut cache = load_cache(cache_path);
 
     // A file that is now shorter than its recorded cursor was rotated, truncated or replaced. Its
@@ -145,7 +165,16 @@ pub fn build_report(
     save_cache(cache_path, &cache);
 
     let prices = load_price_table(price_cache_path);
-    build_report_from_cache(&cache, &prices, range_days)
+    let report = build_report_from_cache(&cache, &prices, range_days);
+    let activity_report = if range_days == 0 {
+        report.clone()
+    } else {
+        build_report_from_cache(&cache, &prices, 0)
+    };
+    UsageReports {
+        report,
+        activity_report,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +800,50 @@ mod tests {
             .unwrap();
         assert_eq!(claude_all.total.total(), 1515);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn builds_selected_and_activity_reports_from_one_refresh() {
+        let base = std::env::temp_dir().join(format!("aisw_usage_bundle_{}", std::process::id()));
+        let projects = base.join("default/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+
+        let today = chrono::Local::now().date_naive();
+        let old = today.checked_sub_days(chrono::Days::new(100)).unwrap();
+        let line = |id: &str, date: chrono::NaiveDate, input: u64| {
+            format!(
+                r#"{{"message":{{"model":"claude-x","id":"{id}","role":"assistant","usage":{{"input_tokens":{input},"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}},"timestamp":"{date}T12:00:00+00:00"}}"#
+            )
+        };
+        std::fs::write(
+            projects.join("conv.jsonl"),
+            format!("{}\n{}\n", line("recent", today, 10), line("old", old, 100)),
+        )
+        .unwrap();
+
+        let reports = build_reports(
+            &base.join("usage.json"),
+            &base.join("prices.json"),
+            &[base.join("default")],
+            &[],
+            30,
+        );
+        let selected = reports
+            .report
+            .tools
+            .iter()
+            .find(|tool| tool.tool_id == ToolId::Claude)
+            .unwrap();
+        let activity = reports
+            .activity_report
+            .tools
+            .iter()
+            .find(|tool| tool.tool_id == ToolId::Claude)
+            .unwrap();
+
+        assert_eq!(selected.total.input, 10);
+        assert_eq!(activity.total.input, 110);
         let _ = std::fs::remove_dir_all(&base);
     }
 

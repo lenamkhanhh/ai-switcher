@@ -441,3 +441,9 @@ export interface UsageReport {
   priceStatus: string;
   priceUpdatedAt: string | null;
 }
+
+export interface UsageReports {
+  report: UsageReport;
+  /** All-time source for the fixed 53-week activity calendar. */
+  activityReport: UsageReport;
+}

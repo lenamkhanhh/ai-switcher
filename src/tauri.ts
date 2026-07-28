@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import type {
   AddAccountInput,
   AddApiAccountInput,
@@ -17,9 +18,36 @@ import type {
   SwitchAccountInput,
   ToolId,
   UsageReport,
+  UsageReports,
 } from "./types";
 
-const isTauri = "__TAURI_INTERNALS__" in window;
+export const isTauri = "__TAURI_INTERNALS__" in window;
+
+/**
+ * Subscribe to a native event only inside the Tauri webview. The browser demo intentionally
+ * uses mocked commands, but it has no event IPC bridge; skipping the subscription keeps its
+ * preview usable instead of creating an unhandled rejected promise on mount.
+ */
+export function subscribeToTauriEvent<T>(
+  eventName: string,
+  handler: (event: { payload: T }) => void,
+) {
+  if (!isTauri) return () => {};
+
+  let disposed = false;
+  let unlisten: (() => void) | undefined;
+  void tauriListen<T>(eventName, handler)
+    .then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    })
+    .catch(() => {});
+
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}
 
 const quota = (five: number | null, week: number | null, error: string | null = null) => ({
   fiveHour: { label: "5-hour limit", percentUsed: five, resetAt: "2026-05-31T15:30:00Z" },
@@ -224,7 +252,10 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
     return true as T;
   }
   if (command === "get_usage") {
-    return structuredClone(demoUsage) as T;
+    return structuredClone({
+      report: demoUsage,
+      activityReport: demoUsage,
+    }) as T;
   }
   if (command === "get_api_usage") {
     return structuredClone(demoApiUsage) as T;
@@ -445,7 +476,7 @@ export const api = {
   validateToolSetup: (input: SetToolSetupInput) =>
     invoke<DetectionReport>("validate_tool_setup", { input }),
   setToolSetup: (input: SetToolSetupInput) => invoke<AppSnapshot>("set_tool_setup", { input }),
-  getUsage: (rangeDays: number) => invoke<UsageReport>("get_usage", { rangeDays }),
+  getUsage: (rangeDays: number) => invoke<UsageReports>("get_usage", { rangeDays }),
   getApiUsage: () => invoke<ApiUsageReport>("get_api_usage"),
   startApiGateway: (input: StartApiGatewayInput) =>
     invoke<AppSnapshot>("start_api_gateway", { input }),

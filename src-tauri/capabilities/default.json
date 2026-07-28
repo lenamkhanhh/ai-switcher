@@ -13,8 +13,6 @@
     "core:window:allow-is-fullscreen",
     "core:window:allow-set-fullscreen",
     "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text",
-    "dialog:default",
     "notification:default",
     "opener:default"
   ]

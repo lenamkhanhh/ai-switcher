@@ -2039,13 +2039,13 @@ button.danger:hover:not(:disabled) {
   font-size: 11px;
 }
 
-/* Standard iOS switch (track 51×31, thumb 27) — overrides the global button */
+/* Compact settings switch — aligned with the smaller desktop control scale. */
 .switchTrack {
   position: relative;
   display: block;
   box-sizing: border-box;
-  width: 51px;
-  height: 31px;
+  width: 42px;
+  height: 24px;
   min-height: 0;
   flex: none;
   padding: 0;
@@ -2065,17 +2065,17 @@ button.danger:hover:not(:disabled) {
 }
 .switchThumb {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 27px;
-  height: 27px;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   transition: transform 0.18s ease;
 }
 .switchTrack.on .switchThumb {
-  transform: translateX(20px);
+  transform: translateX(18px);
 }
 
 /* Smaller switch variant (e.g. the per-account auto-extend toggle). */
@@ -2465,6 +2465,27 @@ button.danger:hover:not(:disabled) {
 .activityCell.future {
   opacity: 0.35;
 }
+
+.shell.accountsTheme .activityCell[data-level="0"] {
+  background: #303036;
+  box-shadow: inset 0 0 0 1px #3c3c43;
+}
+
+.shell.accountsTheme--silver .activityCell[data-level="0"] {
+  background: #e1e4e8;
+  box-shadow: inset 0 0 0 1px #cfd4da;
+}
+
+.shell.accountsTheme .activityCell.future {
+  background: #29292e;
+  box-shadow: inset 0 0 0 1px #34343a;
+}
+
+.shell.accountsTheme--silver .activityCell.future {
+  background: #eef0f2;
+  box-shadow: inset 0 0 0 1px #dde1e5;
+  opacity: 1;
+}
 .activityCell:hover,
 .activityCell:focus-visible {
   filter: brightness(1.18);
@@ -2474,12 +2495,12 @@ button.danger:hover:not(:disabled) {
   z-index: 4;
 }
 .activityTooltip {
-  background: #2a2c32;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #24262c;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 9px;
   bottom: calc(100% + 8px);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  color: var(--text);
+  color: #f7f8fa;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   left: clamp(80px, var(--activity-x), calc(100% - 80px));
@@ -2491,9 +2512,9 @@ button.danger:hover:not(:disabled) {
   z-index: 8;
 }
 .activityTooltip::after {
-  background: #2a2c32;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  background: #24262c;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  border-right: 1px solid rgba(255, 255, 255, 0.18);
   bottom: -4px;
   content: "";
   height: 7px;
@@ -3130,4 +3151,531 @@ button.danger:hover:not(:disabled) {
   .sidebarBrand { padding-left: 16px; padding-right: 16px; }
   .sidebarNav { padding-left: 10px; padding-right: 10px; }
   .toolTab { grid-template-columns: 28px minmax(0, 1fr) auto; padding-left: 6px; padding-right: 6px; }
+}
+
+/* ============================================================
+   Workbench themes — Black Chrome + Platinum Silver
+   Applied to the whole shell so every tab keeps the same visual system.
+   ============================================================ */
+
+.shell.accountsTheme {
+  --bg-window: #1f1f22;
+  --bg-sidebar: #1b1b1d;
+  --surface: #252529;
+  --surface-2: #2d2d31;
+  --surface-hover: #333338;
+  --text: #f1f1f1;
+  --text-2: #d3d3d5;
+  --text-3: #a3a3a8;
+  --line: #36363b;
+  --line-strong: #57575e;
+  --edge: none;
+  --edge-strong: none;
+  --accent: #c8cdd4;
+  --accent-press: #f1f3f5;
+  --accent-soft: rgb(200 205 212 / 0.13);
+  --accent-grad: #d4d8dd;
+  --accent-grad-hover: #eef0f2;
+  --green: #57cc8a;
+  --amber: #f0b44d;
+  --red: #ff5a5f;
+  --green-soft: rgb(87 204 138 / 0.12);
+  --amber-soft: rgb(240 180 77 / 0.14);
+  --red-soft: rgb(255 90 95 / 0.13);
+  --shadow-card: none;
+  --shadow-pop: 0 18px 44px rgb(0 0 0 / 0.34);
+  --radius: 7px;
+  --radius-sm: 5px;
+  background: var(--bg-window);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  padding: 0;
+}
+
+.shell.accountsTheme::before,
+.shell.accountsTheme .sidebar::before,
+.shell.accountsTheme .sidebar::after {
+  display: none;
+}
+
+.shell.accountsTheme .topbar {
+  background: #181818;
+  border-bottom-color: #36363b;
+  box-shadow: none;
+  margin: 0;
+}
+
+.shell.accountsTheme .titlebarDrag {
+  color: #d3d3d5;
+}
+
+.shell.accountsTheme .titlebarDrag img,
+.shell.accountsTheme .sidebarBrandMark img {
+  filter: grayscale(1) brightness(1.52) contrast(0.86);
+}
+
+.shell.accountsTheme .workspace {
+  background: var(--bg-window);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  gap: 0;
+  grid-template-columns: 312px minmax(0, 1fr);
+}
+
+.shell.accountsTheme .sidebar {
+  background: var(--bg-sidebar);
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.shell.accountsTheme .sidebarBrand {
+  min-height: 178px;
+  padding: 32px 28px 24px;
+}
+
+.shell.accountsTheme .sidebarBrand > strong {
+  color: #f1f1f1;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+}
+
+.shell.accountsTheme .sidebarBrandRule {
+  background: #8d939b;
+}
+
+.shell.accountsTheme .sidebarNav {
+  gap: 4px;
+  padding: 12px 16px 0;
+}
+
+.shell.accountsTheme .toolTab {
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  min-height: 82px;
+}
+
+.shell.accountsTheme .sidebarNavIcon,
+.shell.accountsTheme .sidebarNavIndex {
+  color: #a3a3a8;
+}
+
+.shell.accountsTheme .sidebarNavCopy strong {
+  color: #e2e2e4;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+}
+
+.shell.accountsTheme .sidebarNavCopy small {
+  color: #9b9ba1;
+}
+
+.shell.accountsTheme .toolTab:hover:not(.selected) {
+  background: #252529;
+}
+
+.shell.accountsTheme .sidebar .toolTab.selected,
+.shell.accountsTheme .sidebar .toolTab.selected:hover:not(:disabled) {
+  background: #252529;
+  border: 0;
+}
+
+.shell.accountsTheme .toolTab.selected::before {
+  background: #c8cdd4;
+  height: calc(100% - 20px);
+  left: -16px;
+  top: 10px;
+  width: 2px;
+}
+
+.shell.accountsTheme .toolTab.selected .sidebarNavIcon,
+.shell.accountsTheme .toolTab.selected .sidebarNavCopy strong,
+.shell.accountsTheme .toolTab.selected .sidebarNavIndex {
+  color: #f4f4f5;
+}
+
+.shell.accountsTheme .toolTab.selected .sidebarNavCopy small {
+  color: #c1c1c6;
+}
+
+.shell.accountsTheme .sidebarEtching {
+  display: none;
+}
+
+.shell.accountsTheme .sidebarFoot {
+  border-top-color: var(--line);
+  margin: 0 28px;
+}
+
+.shell.accountsTheme .sidebarCredit {
+  color: #b4b4b9;
+}
+
+.shell.accountsTheme .sidebarCredit::before {
+  background: #c8cdd4;
+}
+
+.shell.accountsTheme .panel {
+  background: var(--bg-window);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 30px 30px 34px;
+}
+
+.shell.accountsTheme .panelHead {
+  margin-bottom: 22px;
+}
+
+.shell.accountsTheme .titleRow h2 {
+  color: #f4f4f5;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.shell.accountsTheme .actions {
+  align-items: center;
+  gap: 10px;
+}
+
+.accountThemeToggle {
+  background: #202024;
+  border: 1px solid #48484f;
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 0;
+  overflow: hidden;
+}
+
+.shell.accountsTheme .windowControls .accountThemeToggle {
+  align-self: center;
+  margin: 0 8px 0 4px;
+}
+
+.accountThemeToggle button {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: #a3a3a8;
+  justify-content: center;
+  min-height: 34px;
+  min-width: 38px;
+  padding: 0;
+}
+
+.accountThemeToggle button + button {
+  border-left: 1px solid #48484f;
+}
+
+.accountThemeToggle button:hover:not(:disabled) {
+  background: #333338;
+  border-color: transparent;
+}
+
+.accountThemeToggle button.selected {
+  background: #35353a;
+  color: #f3f4f5;
+}
+
+.accountThemeToggle button:focus-visible,
+.shell.accountsTheme button:focus-visible {
+  outline: 2px solid #d8dde3;
+  outline-offset: 2px;
+}
+
+.shell.accountsTheme .actions > .primaryAction {
+  background: #d4d8dd;
+  border-color: #d4d8dd;
+  box-shadow: none;
+  color: #17191d;
+  font-weight: 650;
+}
+
+.shell.accountsTheme .actions > .primaryAction:hover:not(:disabled) {
+  background: #f0f2f4;
+  border-color: #f0f2f4;
+}
+
+.shell.accountsTheme .actions > .secondaryAction {
+  background: #202024;
+  border-color: #48484f;
+  box-shadow: none;
+  color: #e1e1e3;
+}
+
+.shell.accountsTheme .actions > .secondaryAction:hover:not(:disabled) {
+  background: #333338;
+  border-color: #6a6a73;
+}
+
+.shell.accountsTheme .accountGrid {
+  gap: 12px;
+}
+
+.shell.accountsTheme .account {
+  background: #252529;
+  border-color: #3a3a40;
+  border-radius: 7px;
+  box-shadow: none;
+  gap: 11px;
+}
+
+.shell.accountsTheme .account:hover {
+  border-color: #5a5a62;
+}
+
+.shell.accountsTheme .account.active {
+  border-color: #d8dde3;
+  box-shadow: 0 0 0 1px #d8dde3;
+}
+
+.shell.accountsTheme .account.exhausted {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber);
+}
+
+.shell.accountsTheme .plan {
+  background: #38383e;
+  color: #e7e7e9;
+}
+
+.shell.accountsTheme .cmdChip {
+  background: #202024;
+  border-color: #48484f;
+  color: #c8c8cd;
+}
+
+.shell.accountsTheme .status.ok {
+  background: rgb(87 204 138 / 0.12);
+  border: 1px solid rgb(87 204 138 / 0.18);
+  color: #67d998;
+}
+
+.shell.accountsTheme .autoChip {
+  background: #303039;
+  border-color: #484850;
+  color: #d8dde3;
+}
+
+.shell.accountsTheme .bar {
+  background: #1b1b1e;
+}
+
+.shell.accountsTheme .drift {
+  background: #2b2b31;
+  border-left: 2px solid #c8cdd4;
+}
+
+.shell.accountsTheme .empty {
+  background: #252529;
+  border-color: #4b4b53;
+}
+
+.shell.accountsTheme--silver {
+  --bg-window: #f5f6f7;
+  --bg-sidebar: #f0f1f3;
+  --surface: #ffffff;
+  --surface-2: #eceef0;
+  --surface-hover: #e4e7ea;
+  --text: #17191d;
+  --text-2: #30343a;
+  --text-3: #68707a;
+  --line: #d2d5d9;
+  --line-strong: #aeb4bc;
+  --accent: #3b424b;
+  --accent-press: #17191d;
+  --accent-soft: rgb(59 66 75 / 0.1);
+  --accent-grad: #30363e;
+  --accent-grad-hover: #17191d;
+  --green: #168957;
+  --amber: #ba7516;
+  --red: #db3948;
+  --green-soft: rgb(22 137 87 / 0.1);
+  --amber-soft: rgb(186 117 22 / 0.12);
+  --red-soft: rgb(219 57 72 / 0.1);
+  --shadow-pop: 0 18px 44px rgb(28 32 38 / 0.18);
+}
+
+.shell.accountsTheme--silver .topbar {
+  background: #e9eaec;
+  border-bottom-color: #c9cdd2;
+}
+
+.shell.accountsTheme--silver .titlebarDrag,
+.shell.accountsTheme--silver .windowControls button {
+  color: #30343a;
+}
+
+.shell.accountsTheme--silver .titlebarDrag img,
+.shell.accountsTheme--silver .sidebarBrandMark img {
+  filter: grayscale(1) brightness(0.34) contrast(1.1);
+}
+
+.shell.accountsTheme--silver .sidebarNavCopy strong {
+  color: #20242a;
+}
+
+.shell.accountsTheme--silver .sidebarNavCopy small,
+.shell.accountsTheme--silver .sidebarNavIcon,
+.shell.accountsTheme--silver .sidebarNavIndex {
+  color: #68707a;
+}
+
+.shell.accountsTheme--silver .toolTab:hover:not(.selected) {
+  background: #e5e7ea;
+}
+
+.shell.accountsTheme--silver .sidebar .toolTab.selected,
+.shell.accountsTheme--silver .sidebar .toolTab.selected:hover:not(:disabled) {
+  background: #e4e7ea;
+}
+
+.shell.accountsTheme--silver .toolTab.selected::before {
+  background: #3b424b;
+}
+
+.shell.accountsTheme--silver .toolTab.selected .sidebarNavIcon,
+.shell.accountsTheme--silver .toolTab.selected .sidebarNavCopy strong,
+.shell.accountsTheme--silver .toolTab.selected .sidebarNavIndex {
+  color: #17191d;
+}
+
+.shell.accountsTheme--silver .toolTab.selected .sidebarNavCopy small {
+  color: #4d555f;
+}
+
+.shell.accountsTheme--silver .sidebarBrand > strong {
+  color: #1f2328;
+}
+
+.shell.accountsTheme--silver .sidebarBrandRule {
+  background: #747c86;
+}
+
+.shell.accountsTheme--silver .sidebarFoot {
+  border-top-color: #c9cdd2;
+}
+
+.shell.accountsTheme--silver .sidebarCredit {
+  color: #5f6670;
+}
+
+.shell.accountsTheme--silver .sidebarCredit::before {
+  background: #3b424b;
+}
+
+.shell.accountsTheme--silver .titleRow h2 {
+  color: #17191d;
+}
+
+.shell.accountsTheme--silver .accountThemeToggle {
+  background: #e7e9ec;
+  border-color: #b8bec7;
+}
+
+.shell.accountsTheme--silver .accountThemeToggle button {
+  color: #68707a;
+}
+
+.shell.accountsTheme--silver .accountThemeToggle button + button {
+  border-left-color: #b8bec7;
+}
+
+.shell.accountsTheme--silver .accountThemeToggle button:hover:not(:disabled) {
+  background: #dce0e4;
+}
+
+.shell.accountsTheme--silver .accountThemeToggle button.selected {
+  background: #ffffff;
+  color: #17191d;
+}
+
+.shell.accountsTheme--silver button:focus-visible,
+.shell.accountsTheme--silver .accountThemeToggle button:focus-visible {
+  outline-color: #3b424b;
+}
+
+.shell.accountsTheme--silver .actions > .primaryAction {
+  background: #30363e;
+  border-color: #30363e;
+  color: #ffffff;
+}
+
+.shell.accountsTheme--silver .actions > .primaryAction:hover:not(:disabled) {
+  background: #17191d;
+  border-color: #17191d;
+}
+
+.shell.accountsTheme--silver .actions > .secondaryAction {
+  background: #ffffff;
+  border-color: #b8bec7;
+  color: #30343a;
+}
+
+.shell.accountsTheme--silver .actions > .secondaryAction:hover:not(:disabled) {
+  background: #e7e9ec;
+  border-color: #8f969f;
+}
+
+.shell.accountsTheme--silver .account {
+  background: #ffffff;
+  border-color: #d2d5d9;
+  box-shadow: 0 1px 2px rgb(28 32 38 / 0.08);
+}
+
+.shell.accountsTheme--silver .account:hover {
+  border-color: #aeb4bc;
+}
+
+.shell.accountsTheme--silver .account.active {
+  border-color: #3b424b;
+  box-shadow: 0 0 0 1px #3b424b;
+}
+
+.shell.accountsTheme--silver .plan {
+  background: #e6e8eb;
+  color: #3b424b;
+}
+
+.shell.accountsTheme--silver .cmdChip {
+  background: #f1f2f4;
+  border-color: #d2d5d9;
+  color: #59616c;
+}
+
+.shell.accountsTheme--silver .status.ok {
+  background: rgb(22 137 87 / 0.1);
+  border-color: rgb(22 137 87 / 0.16);
+  color: #168957;
+}
+
+.shell.accountsTheme--silver .autoChip {
+  background: #e6e8eb;
+  border-color: #d2d5d9;
+  color: #3b424b;
+}
+
+.shell.accountsTheme--silver .bar {
+  background: #e4e7ea;
+}
+
+.shell.accountsTheme--silver .drift {
+  background: #e8eaed;
+  border-left-color: #3b424b;
+}
+
+.shell.accountsTheme--silver .empty {
+  background: #ffffff;
+  border-color: #b8bec7;
+}
+
+@media (max-width: 900px) {
+  .shell.accountsTheme .workspace {
+    grid-template-columns: 214px minmax(0, 1fr);
+  }
 }

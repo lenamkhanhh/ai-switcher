@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { AlertTriangle, BarChart3, Loader2, RefreshCw } from "lucide-react";
-import { api } from "./tauri";
+import { api, subscribeToTauriEvent } from "./tauri";
 import type { DayUsage, ModelUsage, SessionUsage, TokenBreakdown, ToolUsage, UsageReport } from "./types";
 
 const RANGES: { label: string; days: number }[] = [
@@ -24,9 +23,9 @@ export function UsageView() {
     setBusy(true);
     setError(null);
     try {
-      const nextReport = await api.getUsage(range);
-      setReport(nextReport);
-      setActivityReport(range === 0 ? nextReport : await api.getUsage(0));
+      const nextReports = await api.getUsage(range);
+      setReport(nextReports.report);
+      setActivityReport(nextReports.activityReport);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -50,10 +49,7 @@ export function UsageView() {
 
   // The background poller refreshes the cache every 5 minutes → refetch with the current range.
   useEffect(() => {
-    const unlisten = listen("usage-changed", () => void load());
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
+    return subscribeToTauriEvent("usage-changed", () => void load());
   }, [load]);
 
   return (
@@ -345,7 +341,7 @@ function TokenActivity({
   return (
     <section className="tokenActivity">
       <div className="tokenActivityHead">
-        <strong>Token activity</strong>
+        <strong>Token activity · Last 12 months</strong>
         <div className="activityModes" role="group" aria-label="Activity grouping">
           {(["daily", "weekly"] as ActivityMode[]).map((item) => (
             <button

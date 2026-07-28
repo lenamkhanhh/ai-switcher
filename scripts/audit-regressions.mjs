@@ -38,6 +38,20 @@ test("desktop security configuration is explicit and least-privilege", async () 
   assert.ok(capability.permissions.includes("clipboard-manager:allow-write-text"));
 });
 
+test("persisted state secrets request owner-only filesystem permissions", async () => {
+  const source = await read("src-tauri/src/store.rs");
+  const writeStart = source.indexOf("fn write_state");
+  const writeEnd = source.indexOf("\n    #[cfg(test)]", writeStart);
+  assert.ok(writeStart >= 0 && writeEnd > writeStart, "state writer must exist");
+
+  const writer = source.slice(writeStart, writeEnd);
+  assert.match(source, /fn set_owner_only_permissions/);
+  assert.ok(
+    (writer.match(/set_owner_only_permissions/g) ?? []).length >= 2,
+    "staged and backup state files must both be hardened",
+  );
+});
+
 test("web shell has a real favicon", async () => {
   const html = await read("index.html");
   assert.match(html, /<link[^>]+rel=["']icon["'][^>]+href=["'][^"']+["']/i);
@@ -49,4 +63,26 @@ test("Usage loads one backend bundle and labels its fixed activity window", asyn
 
   assert.equal(calls.length, 1);
   assert.match(source, /Last 12 months/);
+});
+
+test("Settings switches and Usage activity states stay compact and legible", async () => {
+  const css = await read("src/styles.css");
+  const block = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`));
+    assert.ok(match, `${selector} must have a CSS block`);
+    return match[1];
+  };
+
+  assert.match(block(".switchTrack"), /width:\s*42px/);
+  assert.match(block(".switchTrack"), /height:\s*24px/);
+  assert.match(block(".switchThumb"), /width:\s*18px/);
+  assert.match(block(".switchThumb"), /height:\s*18px/);
+
+  const tooltip = block(".activityTooltip");
+  assert.doesNotMatch(tooltip, /color:\s*var\(--text\)/);
+  assert.match(tooltip, /color:\s*#f[0-9a-f]{5}/i);
+
+  assert.match(css, /\.shell\.accountsTheme\s+\.activityCell\[data-level="0"\]/);
+  assert.match(css, /\.shell\.accountsTheme--silver\s+\.activityCell\[data-level="0"\]/);
 });

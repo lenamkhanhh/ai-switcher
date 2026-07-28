@@ -172,20 +172,8 @@ pub fn base_url(config: &ApiGatewayConfig) -> String {
     format!("http://{}:{}", config.bind_host, config.port)
 }
 
-async fn health(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    match state.store.load() {
-        Ok(data) => Json(json!({
-            "ok": true,
-            "combos": data.api_gateway.combos.len(),
-            "keys": data.api_gateway.keys.iter().filter(|key| key.enabled).count()
-        }))
-        .into_response(),
-        Err(err) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            err.to_string(),
-        ),
-    }
+async fn health() -> impl IntoResponse {
+    Json(json!({ "ok": true }))
 }
 
 async fn models(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
@@ -468,9 +456,12 @@ fn provider_for_model(data: &StoredState, model: &str) -> Option<ToolId> {
             .api_gateway
             .model_registry
             .iter()
-            .filter(|registry| registry.tool_id == tool_id)
-            .any(|registry| registry.models.iter().any(|candidate| candidate == model));
-        if supported && has_enabled_account(data, &tool_id) {
+            .filter(|registry| {
+                registry.tool_id == tool_id
+                    && registry.models.iter().any(|candidate| candidate == model)
+            })
+            .any(|registry| gateway_account_is_eligible(data, &tool_id, &registry.account_id));
+        if supported {
             return Some(tool_id);
         }
     }
@@ -482,18 +473,58 @@ fn provider_for_model(data: &StoredState, model: &str) -> Option<ToolId> {
     } else {
         return None;
     };
+    // Once a provider has returned a registry, it is the account-level source of truth. The
+    // heuristic is intentionally retained only until that first refresh, so an account without
+    // this model in its registry never receives a request that it cannot serve.
+    if data
+        .api_gateway
+        .model_registry
+        .iter()
+        .any(|registry| registry.tool_id == guess)
+    {
+        return None;
+    }
     has_enabled_account(data, &guess).then_some(guess)
 }
 
 /// True if at least one subscription account of this provider is enabled for the gateway (default
 /// enabled when the participation list has no explicit entry yet).
 fn has_enabled_account(data: &StoredState, tool_id: &ToolId) -> bool {
+    data.accounts
+        .iter()
+        .any(|account| gateway_account_is_eligible(data, tool_id, &account.id))
+}
+
+fn gateway_account_is_eligible(data: &StoredState, tool_id: &ToolId, account_id: &str) -> bool {
     data.accounts.iter().any(|account| {
         &account.tool_id == tool_id
+            && account.id == account_id
             && account.api_provider.is_none()
             && !matches!(account.state, AccountState::NeedsLogin)
-            && gateway_account_enabled(data, tool_id, &account.id)
+            && gateway_account_enabled(data, tool_id, account_id)
     })
+}
+
+/// The registry is account-scoped: after at least one registry refresh for a provider, an
+/// account is eligible for a model only when that account explicitly advertised the model. Before
+/// the first refresh we preserve the name-heuristic fallback for a freshly typed model.
+fn account_supports_model(
+    data: &StoredState,
+    tool_id: &ToolId,
+    account_id: &str,
+    model: &str,
+) -> bool {
+    let provider_has_registry = data
+        .api_gateway
+        .model_registry
+        .iter()
+        .any(|registry| &registry.tool_id == tool_id);
+    !provider_has_registry
+        || data.api_gateway.model_registry.iter().any(|registry| {
+            &registry.tool_id == tool_id
+                && registry.account_id == account_id
+                && registry.models.iter().any(|candidate| candidate == model)
+        })
 }
 
 /// Whether an account participates in gateway rotation. Missing participation entry = enabled.
@@ -719,6 +750,7 @@ fn available_candidates(
                 && account.api_provider.is_none()
                 && !matches!(account.state, AccountState::NeedsLogin)
                 && gateway_account_enabled(data, &tool_id, &account.id)
+                && account_supports_model(data, &tool_id, &account.id, model)
         }) {
             let key = account_key(&tool_id, &account.id);
             // De-dupe (account, model) pairs and skip tried/cooling/over-quota accounts.
@@ -3633,6 +3665,38 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn candidate_selection_requires_each_account_to_advertise_the_model() {
+        let root =
+            std::env::temp_dir().join(format!("aisw-api-account-models-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let state = GatewayState {
+            store,
+            client: reqwest::Client::new(),
+            runtime: Mutex::new(GatewayRuntime::default()),
+        };
+        let mut data = StoredState::default();
+        data.api_gateway.quota_threshold = 95.0;
+        data.accounts = vec![
+            account(ToolId::Claude, "a1", 20.0),
+            account(ToolId::Claude, "a2", 20.0),
+        ];
+        data.api_gateway.model_registry = vec![registry(ToolId::Claude, "a1", &["claude-1"])];
+        let combo = combo("local", &["claude-1"]);
+
+        let candidates = available_candidates(&state, &data, &combo, &HashSet::new());
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.account.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1"],
+            "a2 did not advertise claude-1 and must not receive traffic for it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// An upstream that closes without a trailing newline still has its final event delivered.
     /// In the Anthropic→Responses direction that last line is the `response.completed` envelope,
     /// and losing it leaves the client waiting for a completion that never arrives.
@@ -4011,6 +4075,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
             .await
             .unwrap();
         assert_eq!(health.status(), reqwest::StatusCode::OK);
+        assert_eq!(health.json::<Value>().await.unwrap(), json!({ "ok": true }));
 
         let unauthorized = client
             .get(format!("{root_url}/v1/models"))

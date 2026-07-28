@@ -922,3 +922,12 @@ pub struct UsageReport {
     pub price_status: String,
     pub price_updated_at: Option<String>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReports {
+    /// Totals and tables filtered by the range selected in the Usage tab.
+    pub report: UsageReport,
+    /// Fixed all-time source used to render the intentional 53-week activity calendar.
+    pub activity_report: UsageReport,
+}

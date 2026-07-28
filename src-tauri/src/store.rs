@@ -52,6 +52,30 @@ fn default_threshold() -> f64 {
 /// Serializes every write to `state.json` inside this process.
 static STATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_directory_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_directory_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 fn lock_state_writes() -> std::sync::MutexGuard<'static, ()> {
     // A previous writer panicking mid-save must not make the state file permanently unwritable.
     STATE_WRITE_LOCK
@@ -95,6 +119,14 @@ impl Store {
         let root = dirs.data_local_dir().to_path_buf();
         fs::create_dir_all(root.join("accounts"))?;
         fs::create_dir_all(root.join("backups"))?;
+        set_owner_only_directory_permissions(&root)?;
+        set_owner_only_directory_permissions(&root.join("accounts"))?;
+        set_owner_only_directory_permissions(&root.join("backups"))?;
+        for secret_path in [root.join("state.json"), root.join("state.json.bak")] {
+            if secret_path.exists() {
+                set_owner_only_permissions(&secret_path)?;
+            }
+        }
         Ok(Self { root })
     }
 
@@ -211,10 +243,15 @@ impl Store {
         // refill the file we are about to rename into place.
         let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
         fs::write(&tmp, &encoded)?;
+        set_owner_only_permissions(&tmp)?;
         if path.exists() {
-            let _ = fs::copy(&path, self.state_backup_path());
+            let backup = self.state_backup_path();
+            if fs::copy(&path, &backup).is_ok() {
+                set_owner_only_permissions(&backup)?;
+            }
         }
         fs::rename(&tmp, &path)?;
+        set_owner_only_permissions(&path)?;
         Ok(())
     }
 

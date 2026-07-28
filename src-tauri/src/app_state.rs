@@ -5,7 +5,7 @@ use crate::models::{
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
     DeleteApiGatewayKeyInput, DetectionReport, QuotaInfo, RenameAccountInput,
     SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
-    StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport,
+    StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport, UsageReports,
 };
 use crate::quota::{codex_account_email, read_quota};
 use crate::store::{normalize_account_states, Store, StoredState};
@@ -747,6 +747,16 @@ impl ManagedState {
         )
     }
 
+    pub fn usage_reports(&self, range_days: u32) -> UsageReports {
+        crate::usage::build_reports(
+            &self.store.usage_cache_path(),
+            &self.store.price_cache_path(),
+            &self.config_dirs(&ToolId::Claude),
+            &self.config_dirs(&ToolId::Codex),
+            range_days,
+        )
+    }
+
     pub fn api_usage_report(&self) -> ApiUsageReport {
         crate::api_gateway::usage_report(&self.store)
     }
@@ -1137,14 +1147,15 @@ impl ManagedState {
         app: Option<&AppHandle>,
     ) -> Result<()> {
         if tool_id == &ToolId::Codex {
-            self.try_seamless_codex_handoff(
+            if self.try_seamless_codex_handoff(
                 threshold.min(crate::seamless::DEFAULT_HANDOFF_THRESHOLD),
                 false,
                 app,
-            )?;
-            return Ok(());
+            )? {
+                return Ok(());
+            }
         }
-        if !matches!(tool_id, ToolId::Claude) {
+        if !matches!(tool_id, ToolId::Claude | ToolId::Codex) {
             return Ok(());
         }
         let target = {
@@ -1180,7 +1191,7 @@ impl ManagedState {
         };
 
         self.refresh_runtime_for_account_switch(tool_id, &target_id, is_default, is_api)
-            .context("Auto-switch failed while refreshing the Codex runtime")?;
+            .context("Auto-switch failed while refreshing the selected runtime")?;
         if is_default {
             clear_active_profile(tool_id, &self.store)
                 .context("Auto-switch failed while restoring the default profile")?;
@@ -1271,7 +1282,7 @@ impl ManagedState {
             .codex_handoff_running
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            return Ok(false);
+            return Ok(true);
         }
         let _handoff_guard = FlagGuard(&self.codex_handoff_running);
 
@@ -1327,7 +1338,10 @@ impl ManagedState {
                 &self.store.handoff_dir(),
                 &current.name,
             )?,
-            None => return Ok(true),
+            // A quota poll often runs when there is no active Codex rollout (for example, the
+            // user is in a terminal or hasn't started a task yet). There is nothing to resume,
+            // but quota rotation must still happen through the ordinary switch path.
+            None => return Ok(false),
         };
         let Some((mut checkpoint, checkpoint_path)) = checkpoint_result else {
             return Ok(true);
@@ -3139,6 +3153,39 @@ mod tests {
         let target = auto_switch_target(&accounts, &ToolId::Codex, 100.0, Some("acc-1"));
 
         assert_eq!(target.map(|account| account.id.as_str()), Some("acc-2"));
+    }
+
+    #[test]
+    fn codex_handoff_without_a_rollout_allows_regular_auto_switch_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("aisw-codex-fallback-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let exhausted = test_account("active", AccountState::Exhausted, 100.0);
+        let replacement = test_account("healthy", AccountState::Idle, 20.0);
+        let mut data = StoredState::default();
+        data.accounts = vec![exhausted, replacement];
+
+        let profile_dir = store.account_dir(&ToolId::Codex, "active");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        write_active_profile(&ToolId::Codex, &store, "active").unwrap();
+        let state = ManagedState {
+            store,
+            data: Mutex::new(data),
+            api_server: Mutex::new(crate::api_gateway::ApiServerHandle::stopped(
+                &ApiGatewayConfig::default(),
+            )),
+            codex_quota_watch: Mutex::new(BTreeMap::new()),
+            codex_active_rollout: Mutex::new(None),
+            codex_handoff_running: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        assert!(
+            !state.try_seamless_codex_handoff(95.0, false, None).unwrap(),
+            "without an exact rollout, the caller must continue to the normal Codex switch"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -23,18 +23,19 @@ import {
   Settings,
   ShieldAlert,
   Square,
+  Sun,
   Terminal,
   Trash2,
   Users,
   X,
   Zap,
+  Moon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api } from "./tauri";
+import { api, isTauri, subscribeToTauriEvent } from "./tauri";
 
 /// `getCurrentWindow()` reads `window.__TAURI_INTERNALS__.metadata` synchronously and is not
 /// guarded, so outside the Tauri shell it throws. Thrown from an effect with no error boundary
@@ -63,6 +64,63 @@ const nativeWindow = () => {
     return null;
   }
 };
+
+async function openExternalUrl(url: string) {
+  if (isTauri) {
+    try {
+      await openUrl(url);
+      return;
+    } catch {
+      // Fall back to the browser path if the native opener plugin is unavailable.
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+type AccountTheme = "black" | "silver";
+
+const accountThemeStorageKey = "ai-account-switcher:accounts-theme";
+
+function initialAccountTheme(): AccountTheme {
+  try {
+    return window.localStorage.getItem(accountThemeStorageKey) === "silver" ? "silver" : "black";
+  } catch {
+    return "black";
+  }
+}
+
+function AccountThemeToggle({
+  value,
+  onChange,
+}: {
+  value: AccountTheme;
+  onChange: (theme: AccountTheme) => void;
+}) {
+  return (
+    <div className="accountThemeToggle" role="group" aria-label="Application appearance">
+      <button
+        type="button"
+        className={value === "silver" ? "selected" : ""}
+        aria-label="Use silver appearance"
+        aria-pressed={value === "silver"}
+        title="Silver appearance"
+        onClick={() => onChange("silver")}
+      >
+        <Sun />
+      </button>
+      <button
+        type="button"
+        className={value === "black" ? "selected" : ""}
+        aria-label="Use black appearance"
+        aria-pressed={value === "black"}
+        title="Black appearance"
+        onClick={() => onChange("black")}
+      >
+        <Moon />
+      </button>
+    </div>
+  );
+}
 import { UsageView } from "./UsageView";
 import logoUrl from "./assets/logo-luxury.png";
 import type {
@@ -152,6 +210,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot);
   const [selectedTool, setSelectedTool] = useState<ToolId>("codex");
   const [view, setView] = useState<"accounts" | "api" | "usage" | "settings">("accounts");
+  const [accountTheme, setAccountTheme] = useState<AccountTheme>(initialAccountTheme);
   const [windowFullscreen, setWindowFullscreen] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
   // One unified notification channel for the whole app: success + error both render as a
@@ -182,6 +241,14 @@ export function App() {
   const [setupPrompted, setSetupPrompted] = useState<Set<ToolId>>(new Set());
   // Last Codex device code we raised a toast for, so a repeated event can't re-announce it.
   const announcedDeviceCode = useRef<string | null>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(accountThemeStorageKey, accountTheme);
+    } catch {
+      // Theme preference is cosmetic; the Accounts tab still works when storage is unavailable.
+    }
+  }, [accountTheme]);
 
   useEffect(() => {
     getVersion()
@@ -259,12 +326,9 @@ export function App() {
 
   // Backend pushes a fresh snapshot when a login finishes / a background auto-switch happens.
   useEffect(() => {
-    const unlisten = listen<AppSnapshot>("snapshot-changed", (event) => {
+    return subscribeToTauriEvent<AppSnapshot>("snapshot-changed", (event) => {
       setSnapshot(event.payload);
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
   }, []);
 
   // Stable identity for the set of CLI tools to poll. `snapshot` is replaced on every refresh, so
@@ -350,16 +414,13 @@ export function App() {
 
   // Banner when the app auto-switches an account because quota ran out.
   useEffect(() => {
-    const unlisten = listen<string>("auto-switched", (event) => {
+    return subscribeToTauriEvent<string>("auto-switched", (event) => {
       setAutoSwitchBanner(event.payload);
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<AutoSwitchHandoffEvent>("auto-switch-handoff", (event) => {
+    return subscribeToTauriEvent<AutoSwitchHandoffEvent>("auto-switch-handoff", (event) => {
       void copyToClipboard(event.payload.prompt).then((ok) => {
         notify(
           ok
@@ -369,13 +430,10 @@ export function App() {
         );
       });
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
   }, [notify]);
 
   useEffect(() => {
-    const unlisten = listen<LoginPromptEvent>("login-prompt", (event) => {
+    return subscribeToTauriEvent<LoginPromptEvent>("login-prompt", (event) => {
       setLoginPrompt((current) => {
         const next =
           current?.accountId === event.payload.accountId
@@ -395,9 +453,6 @@ export function App() {
         notify("Codex login code is ready in the app.", "info");
       }
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
   }, [notify]);
 
   useEffect(() => {
@@ -527,7 +582,9 @@ export function App() {
     );
 
   return (
-    <main className={`shell ${windowFullscreen ? "isFullscreen" : ""}`}>
+    <main
+      className={`shell accountsTheme accountsTheme--${accountTheme} ${windowFullscreen ? "isFullscreen" : ""}`}
+    >
       {!windowFullscreen && (
         <header className="topbar">
           <div
@@ -539,6 +596,7 @@ export function App() {
             <span>AI Account Switcher</span>
           </div>
           <div className="windowControls">
+            <AccountThemeToggle value={accountTheme} onChange={setAccountTheme} />
             <button
               type="button"
               aria-label="Minimize"
@@ -623,7 +681,7 @@ export function App() {
           </div>
           <button
             type="button"
-            onClick={() => void openUrl(loginPrompt.loginUrl ?? "https://auth.openai.com/codex/device")}
+            onClick={() => void openExternalUrl(loginPrompt.loginUrl ?? "https://auth.openai.com/codex/device")}
           >
             <LogIn /> Open
           </button>
@@ -736,7 +794,7 @@ export function App() {
           <div className="sidebarFoot">
             <button
               className="sidebarCredit"
-              onClick={() => void openUrl("https://hoangphan.blog/").catch(() => {})}
+              onClick={() => void openExternalUrl("https://hoangphan.blog/")}
               title="https://hoangphan.blog/"
             >
               {version && <span>v{version}</span>}
@@ -859,6 +917,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  className="primaryAction"
                   onClick={() => setDialog("add")}
                   disabled={!currentTool.installed || busy !== null}
                 >
@@ -866,6 +925,7 @@ export function App() {
                   {currentTool.id === "antigravity" ? "Save current account" : "Add account"}
                 </button>
                 <button
+                  className="secondaryAction"
                   onClick={refresh}
                   disabled={busy !== null || refreshingAccounts.size > 0}
                 >
