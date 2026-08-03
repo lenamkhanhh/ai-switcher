@@ -7,7 +7,13 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 test("heavy Tauri commands are async and move blocking work off the UI thread", async () => {
   const source = await read("src-tauri/src/lib.rs");
 
-  for (const command of ["fetch_gateway_models", "get_usage", "stop_api_gateway"]) {
+  for (const command of [
+    "fetch_gateway_models",
+    "get_usage",
+    "stop_api_gateway",
+    "initialize_vault",
+    "unlock_vault",
+  ]) {
     assert.match(source, new RegExp(`async\\s+fn\\s+${command}\\s*\\(`));
   }
 
@@ -52,6 +58,29 @@ test("persisted state secrets request owner-only filesystem permissions", async 
   );
 });
 
+test("secure credential vault is encrypted, scoped, and never part of normal app state", async () => {
+  const vault = await read("src-tauri/src/vault.rs");
+  const models = await read("src-tauri/src/models.rs");
+  const store = await read("src-tauri/src/store.rs");
+  const app = await read("src/App.tsx");
+  const tauri = await read("src/tauri.ts");
+
+  assert.match(vault, /CHACHA20_POLY1305/);
+  assert.match(vault, /PBKDF2_ITERATIONS:\s*u32\s*=\s*600_000/);
+  assert.match(vault, /atomic_write/);
+  assert.match(vault, /set_owner_only_permissions/);
+  assert.match(vault, /Secure vault is locked/);
+  assert.match(vault, /record_key\(tool_id, account_id\)/);
+  assert.match(store, /credentials\.vault/);
+  assert.doesNotMatch(models, /pub struct StoredState[\s\S]*password/);
+  assert.match(app, /Secure credentials/);
+  assert.match(app, /CredentialsDialog/);
+  assert.match(app, /Store details manually/);
+  assert.match(tauri, /save_vault_credential/);
+  assert.match(tauri, /get_vault_credential/);
+  assert.match(tauri, /delete_vault_credential/);
+});
+
 test("web shell has a real favicon", async () => {
   const html = await read("index.html");
   assert.match(html, /<link[^>]+rel=["']icon["'][^>]+href=["'][^"']+["']/i);
@@ -85,4 +114,75 @@ test("Settings switches and Usage activity states stay compact and legible", asy
 
   assert.match(css, /\.shell\.accountsTheme\s+\.activityCell\[data-level="0"\]/);
   assert.match(css, /\.shell\.accountsTheme--silver\s+\.activityCell\[data-level="0"\]/);
+});
+
+test("Accounts uses a responsive Tokyo workbench shell without changing the card contract", async () => {
+  const source = await read("src/App.tsx");
+  const css = await read("src/styles.css");
+
+  assert.match(source, /<nav className="activityRail"/);
+  assert.match(source, /<section className="accountSummary"/);
+  assert.match(source, /<footer className="workbenchStatusBar"/);
+  assert.match(source, /if \(quota\?\.error\) return true;/);
+
+  const cardStart = source.indexOf("function AccountCard");
+  const cardEnd = source.indexOf("\nfunction AutoSwitchBar", cardStart);
+  assert.ok(cardStart >= 0 && cardEnd > cardStart, "AccountCard must remain independently reviewable");
+  const card = source.slice(cardStart, cardEnd);
+  assert.match(card, /accountName/);
+  assert.match(card, /cmdChip/);
+  assert.match(card, /<Quota quota=\{account\.quota\} \/>/);
+  assert.match(card, /disabled=\{isActive \|\| needsLogin \|\| busy !== null\}/);
+  assert.match(card, /<RefreshCw \/>/);
+  assert.match(card, /<Terminal \/>/);
+  assert.match(card, /<Pencil \/>/);
+  assert.match(card, /<Trash2 \/>/);
+
+  assert.match(css, /grid-template-columns:\s*48px 248px minmax\(0,\s*1fr\)/);
+  assert.match(css, /@media \(max-width:\s*1480px\)[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(css, /@media \(max-width:\s*1040px\)[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(css, /\.shell\.accountsTheme\s+\.quotaReset\s*\{[^}]*font-size:\s*11px/s);
+});
+
+test("Codex login prompts finish account-scoped after output is drained", async () => {
+  const app = await read("src/App.tsx");
+  const lifecycle = await read("src/loginPromptLifecycle.ts");
+  const tools = await read("src-tauri/src/tools.rs");
+
+  assert.match(app, /subscribeToTauriEvent<LoginPromptFinishedEvent>\(\s*"login-prompt-finished"/);
+  assert.match(app, /finishLoginPrompt\(current,\s*event\.payload\)/);
+  assert.match(app, /reconcileLoginPromptWithTools\(\s*loginPrompt,\s*snapshot\.tools/);
+  assert.match(lifecycle, /current\.attemptId > next\.attemptId/);
+  assert.match(lifecycle, /current\.attemptId < next\.attemptId/);
+  assert.match(lifecycle, /finished\.attemptId >= current\.attemptId/);
+  assert.match(tools, /attempt_id: u64/);
+  assert.match(tools, /NEXT_LOGIN_ATTEMPT_ID\.fetch_add/);
+
+  const waiterStart = tools.indexOf("let success = child.wait()");
+  const drainStart = tools.indexOf("for reader in output_readers", waiterStart);
+  const completionEmit = tools.indexOf('"login-prompt-finished"', waiterStart);
+  assert.ok(waiterStart >= 0, "hidden login process must be awaited");
+  assert.ok(drainStart > waiterStart, "login output readers must drain after process exit");
+  assert.ok(
+    completionEmit > drainStart,
+    "completion must emit after output drains so a late prompt cannot reappear",
+  );
+});
+
+test("Settings formats CLI paths for display without mutating stored setup paths", async () => {
+  const app = await read("src/App.tsx");
+  const formatter = await read("src/pathDisplay.ts");
+
+  assert.match(app, /formatPathForDisplay\(setup!\.binaryPath!\)/);
+  assert.match(app, /normalizePathForDisplay\(setup!\.binaryPath!\)/);
+  assert.match(app, /<small title=\{fullPaths\}>/);
+  assert.match(app, /<code title=\{normalizePathForDisplay\(value\)\}>/);
+  assert.match(app, /formatPathForDisplay\(value\)/);
+  assert.match(app, /title=\{normalizePathForDisplay\(item\.path\)\}/);
+  assert.match(app, /formatPathForDisplay\(item\.path\)/);
+  assert.ok(
+    formatter.includes('path.replace(/\\//g, "\\\\")'),
+    "Windows display paths must replace forward slashes only in the rendered copy",
+  );
+  assert.match(formatter, /compact\.slice\(-\(maxLength - 1\)\)/);
 });

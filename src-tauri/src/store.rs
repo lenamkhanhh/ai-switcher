@@ -134,6 +134,11 @@ impl Store {
         self.root.join("state.json")
     }
 
+    /// Encrypted user-entered credentials. The file is never included in the normal app snapshot.
+    pub fn vault_path(&self) -> PathBuf {
+        self.root.join("credentials.vault")
+    }
+
     /// Incremental token-usage cache (per-file cursors + aggregated buckets).
     pub fn usage_cache_path(&self) -> PathBuf {
         self.root.join("usage.json")

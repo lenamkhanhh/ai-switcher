@@ -47,6 +47,54 @@ impl ToolId {
 
 }
 
+/// Metadata exposed for the encrypted credential vault. Secret values never appear in this type.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStatus {
+    pub configured: bool,
+    pub unlocked: bool,
+    pub record_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultCredentialSummary {
+    pub tool_id: ToolId,
+    pub account_id: String,
+    pub username: String,
+    pub source: String,
+    pub notes: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultCredential {
+    pub tool_id: ToolId,
+    pub account_id: String,
+    pub username: String,
+    pub password: String,
+    pub totp_secret: String,
+    pub source: String,
+    pub notes: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultCredentialInput {
+    pub tool_id: ToolId,
+    pub account_id: String,
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub totp_secret: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub notes: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AccountState {

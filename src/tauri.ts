@@ -19,6 +19,10 @@ import type {
   ToolId,
   UsageReport,
   UsageReports,
+  VaultCredential,
+  VaultCredentialInput,
+  VaultCredentialSummary,
+  VaultStatus,
 } from "./types";
 
 export const isTauri = "__TAURI_INTERNALS__" in window;
@@ -148,7 +152,7 @@ const demoSnapshot: AppSnapshot = {
           lastUsedAt: null, quota: quota(40, 55), launcherCommand: null, launcherPaths: null, quotaStatus: "ready", isDefault: true, codexLoginMethod: "deviceCode",
         },
         {
-          id: "x2", toolId: "codex", name: "Pro 6x", state: "needs-login", fingerprint: "profile:x2",
+          id: "x2", toolId: "codex", name: "Pro 6x", state: "needsLogin", fingerprint: "profile:x2",
           createdAt: "2026-05-19T10:00:00Z", updatedAt: "2026-05-31T08:00:00Z",
           lastUsedAt: null, quota: quota(null, null, "Waiting for login in Terminal"),
           launcherCommand: "codex-pro6", launcherPaths: ["/opt/homebrew/bin/codex-pro6"], quotaStatus: "error", isDefault: false, codexLoginMethod: "browserProfile",
@@ -236,6 +240,11 @@ const demoApiUsage: ApiUsageReport = {
   rows: [],
 };
 
+// Browser/dev fallback only: never use real credentials in this mock. Native builds keep the
+// actual values inside the encrypted Rust vault and only return them after an explicit unlock.
+let demoVaultStatus: VaultStatus = { configured: false, unlocked: false, recordCount: 0 };
+const demoVaultCredentials = new Map<string, VaultCredential>();
+
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri) {
     return tauriInvoke<T>(command, args);
@@ -259,6 +268,62 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
   }
   if (command === "get_api_usage") {
     return structuredClone(demoApiUsage) as T;
+  }
+  if (command === "get_vault_status") {
+    return { ...demoVaultStatus } as T;
+  }
+  if (command === "initialize_vault") {
+    const passkey = String(args?.passkey ?? "");
+    if (passkey.length < 8) throw new Error("Vault passkey must be at least 8 characters");
+    demoVaultCredentials.clear();
+    demoVaultStatus = { configured: true, unlocked: true, recordCount: 0 };
+    return { ...demoVaultStatus } as T;
+  }
+  if (command === "unlock_vault") {
+    if (!demoVaultStatus.configured) throw new Error("Secure vault is not configured");
+    const passkey = String(args?.passkey ?? "");
+    if (passkey.length < 8) throw new Error("Secure vault could not be unlocked — check the passkey");
+    demoVaultStatus = { ...demoVaultStatus, unlocked: true };
+    return { ...demoVaultStatus } as T;
+  }
+  if (command === "lock_vault") {
+    demoVaultStatus = { ...demoVaultStatus, unlocked: false };
+    return undefined as T;
+  }
+  if (command === "list_vault_credentials") {
+    if (!demoVaultStatus.unlocked) throw new Error("Secure vault is locked — unlock it first");
+    return Array.from(demoVaultCredentials.values()).map(({ password: _password, totpSecret: _totp, ...summary }) => summary) as T;
+  }
+  if (command === "get_vault_credential") {
+    if (!demoVaultStatus.unlocked) throw new Error("Secure vault is locked — unlock it first");
+    const key = `${String(args?.toolId)}:${String(args?.accountId)}`;
+    return (demoVaultCredentials.get(key) ?? null) as T;
+  }
+  if (command === "save_vault_credential") {
+    if (!demoVaultStatus.unlocked) throw new Error("Secure vault is locked — unlock it first");
+    const input = args?.input as VaultCredentialInput;
+    const key = `${input.toolId}:${input.accountId}`;
+    const summary: VaultCredentialSummary = {
+      toolId: input.toolId,
+      accountId: input.accountId,
+      username: input.username,
+      source: input.source ?? "",
+      notes: input.notes ?? "",
+      updatedAt: new Date().toISOString(),
+    };
+    demoVaultCredentials.set(key, {
+      ...summary,
+      password: input.password,
+      totpSecret: input.totpSecret ?? "",
+    });
+    demoVaultStatus = { ...demoVaultStatus, recordCount: demoVaultCredentials.size };
+    return summary as T;
+  }
+  if (command === "delete_vault_credential") {
+    if (!demoVaultStatus.unlocked) throw new Error("Secure vault is locked — unlock it first");
+    demoVaultCredentials.delete(`${String(args?.toolId)}:${String(args?.accountId)}`);
+    demoVaultStatus = { ...demoVaultStatus, recordCount: demoVaultCredentials.size };
+    return undefined as T;
   }
   if (command === "fetch_gateway_models") {
     return [
@@ -466,6 +531,17 @@ export const api = {
   setLauncher: (input: SetLauncherInput) => invoke<AppSnapshot>("set_launcher", { input }),
   deleteAccount: (toolId: ToolId, accountId: string) =>
     invoke<AppSnapshot>("delete_account", { toolId, accountId }),
+  getVaultStatus: () => invoke<VaultStatus>("get_vault_status"),
+  initializeVault: (passkey: string) => invoke<VaultStatus>("initialize_vault", { passkey }),
+  unlockVault: (passkey: string) => invoke<VaultStatus>("unlock_vault", { passkey }),
+  lockVault: () => invoke<void>("lock_vault"),
+  listVaultCredentials: () => invoke<VaultCredentialSummary[]>("list_vault_credentials"),
+  getVaultCredential: (toolId: ToolId, accountId: string) =>
+    invoke<VaultCredential | null>("get_vault_credential", { toolId, accountId }),
+  saveVaultCredential: (input: VaultCredentialInput) =>
+    invoke<VaultCredentialSummary>("save_vault_credential", { input }),
+  deleteVaultCredential: (toolId: ToolId, accountId: string) =>
+    invoke<void>("delete_vault_credential", { toolId, accountId }),
   acceptDisclaimer: () => invoke<AppSnapshot>("accept_disclaimer"),
   antigravityNewLogin: () => invoke<AppSnapshot>("antigravity_new_login"),
   setAutoSwitch: (enabled: boolean, threshold: number) =>

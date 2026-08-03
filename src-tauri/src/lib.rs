@@ -18,7 +18,8 @@ use models::{
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
     DeleteApiGatewayKeyInput, DetectionReport, RenameAccountInput, SaveApiGatewayComboInput,
     SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput, StartApiGatewayInput,
-    SwitchAccountInput, ToolId, UsageReports,
+    SwitchAccountInput, ToolId, UsageReports, VaultCredential, VaultCredentialInput,
+    VaultCredentialSummary, VaultStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -150,6 +151,78 @@ fn delete_account(
         .map_err(display_error)?;
     tray::rebuild(&app);
     Ok(snapshot)
+}
+
+#[tauri::command]
+fn get_vault_status(state: State<'_, ManagedState>) -> Result<VaultStatus, String> {
+    state.vault_status().map_err(display_error)
+}
+
+#[tauri::command]
+async fn initialize_vault(
+    app: tauri::AppHandle,
+    passkey: String,
+) -> Result<VaultStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .initialize_vault(passkey)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn unlock_vault(app: tauri::AppHandle, passkey: String) -> Result<VaultStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .unlock_vault(passkey)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn lock_vault(state: State<'_, ManagedState>) {
+    state.lock_vault();
+}
+
+#[tauri::command]
+fn list_vault_credentials(
+    state: State<'_, ManagedState>,
+) -> Result<Vec<VaultCredentialSummary>, String> {
+    state.list_vault_credentials().map_err(display_error)
+}
+
+#[tauri::command]
+fn get_vault_credential(
+    state: State<'_, ManagedState>,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<Option<VaultCredential>, String> {
+    state
+        .get_vault_credential(tool_id, account_id)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn save_vault_credential(
+    state: State<'_, ManagedState>,
+    input: VaultCredentialInput,
+) -> Result<VaultCredentialSummary, String> {
+    state.save_vault_credential(input).map_err(display_error)
+}
+
+#[tauri::command]
+fn delete_vault_credential(
+    state: State<'_, ManagedState>,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<(), String> {
+    state
+        .delete_vault_credential(tool_id, account_id)
+        .map_err(display_error)
 }
 
 #[tauri::command]
@@ -364,6 +437,14 @@ pub fn run() {
             switch_account,
             set_launcher,
             delete_account,
+            get_vault_status,
+            initialize_vault,
+            unlock_vault,
+            lock_vault,
+            list_vault_credentials,
+            get_vault_credential,
+            save_vault_credential,
+            delete_vault_credential,
             accept_disclaimer,
             antigravity_new_login,
             set_auto_switch,
@@ -443,6 +524,7 @@ pub fn run() {
             // tray stay alive so quick-switch keeps working. Quit is via the tray menu.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    window.app_handle().state::<ManagedState>().lock_vault();
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -453,6 +535,7 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 let state = app.state::<ManagedState>();
+                state.lock_vault();
                 let _ = state.stop_api_gateway();
             }
             #[cfg(target_os = "macos")]
@@ -468,7 +551,15 @@ pub fn run() {
 
 fn display_error(error: anyhow::Error) -> String {
     let text = error.to_string();
-    if text.contains("Failed to switch account") {
+    if text.contains("Secure vault is locked") {
+        "Secure vault is locked — unlock it first".to_string()
+    } else if text.contains("Vault could not be unlocked") {
+        "Secure vault could not be unlocked — check the passkey".to_string()
+    } else if text.contains("Secure vault is already configured") {
+        "Secure vault is already configured".to_string()
+    } else if text.contains("Secure vault") {
+        "Secure vault operation failed — try again".to_string()
+    } else if text.contains("Failed to switch account") {
         "Failed to switch account — kept the previous account".to_string()
     } else if text.contains("Login not completed") {
         "Login not completed, account not added".to_string()

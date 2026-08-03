@@ -13,6 +13,9 @@ import {
   KeyRound,
   Layers,
   Loader2,
+  Eye,
+  EyeOff,
+  LockKeyhole,
   LogIn,
   Minus,
   Pencil,
@@ -35,6 +38,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  finishLoginPrompt,
+  mergeLoginPrompt,
+  reconcileLoginPromptWithTools,
+  type LoginPromptEvent,
+  type LoginPromptFinishedEvent,
+} from "./loginPromptLifecycle";
+import {
+  formatPathForDisplay,
+  normalizePathForDisplay,
+} from "./pathDisplay";
 import { api, isTauri, subscribeToTauriEvent } from "./tauri";
 
 /// `getCurrentWindow()` reads `window.__TAURI_INTERNALS__.metadata` synchronously and is not
@@ -101,9 +115,9 @@ function AccountThemeToggle({
       <button
         type="button"
         className={value === "silver" ? "selected" : ""}
-        aria-label="Use silver appearance"
+        aria-label="Use Shiro light appearance"
         aria-pressed={value === "silver"}
-        title="Silver appearance"
+        title="Shiro · light workbench"
         onClick={() => onChange("silver")}
       >
         <Sun />
@@ -111,9 +125,9 @@ function AccountThemeToggle({
       <button
         type="button"
         className={value === "black" ? "selected" : ""}
-        aria-label="Use black appearance"
+        aria-label="Use Kuro dark appearance"
         aria-pressed={value === "black"}
-        title="Black appearance"
+        title="Kuro · dark workbench"
         onClick={() => onChange("black")}
       >
         <Moon />
@@ -144,6 +158,9 @@ import type {
   ToolSetup,
   ToolId,
   ToolStatus,
+  VaultCredential,
+  VaultCredentialInput,
+  VaultStatus,
 } from "./types";
 
 /** Host shown on an API account card (best-effort parse of the gateway URL). */
@@ -194,12 +211,11 @@ const emptySnapshot: AppSnapshot = {
   },
 };
 
-interface LoginPromptEvent {
-  toolId: ToolId;
-  accountId: string;
-  loginUrl: string | null;
-  deviceCode: string | null;
-}
+const emptyVaultStatus: VaultStatus = {
+  configured: false,
+  unlocked: false,
+  recordCount: 0,
+};
 
 interface AutoSwitchHandoffEvent {
   path: string;
@@ -211,6 +227,7 @@ export function App() {
   const [selectedTool, setSelectedTool] = useState<ToolId>("codex");
   const [view, setView] = useState<"accounts" | "api" | "usage" | "settings">("accounts");
   const [accountTheme, setAccountTheme] = useState<AccountTheme>(initialAccountTheme);
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus>(emptyVaultStatus);
   const [windowFullscreen, setWindowFullscreen] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
   // One unified notification channel for the whole app: success + error both render as a
@@ -232,7 +249,7 @@ export function App() {
   const setError = useCallback((text: string | null) => text && notify(text, "error"), [notify]);
   const [busy, setBusy] = useState<string | null>(null);
   const [refreshingAccounts, setRefreshingAccounts] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<"add" | "rename" | "launcher" | "setup" | null>(null);
+  const [dialog, setDialog] = useState<"add" | "rename" | "launcher" | "setup" | "credentials" | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [switchNotice, setSwitchNotice] = useState<string | null>(null);
   const [autoSwitchBanner, setAutoSwitchBanner] = useState<string | null>(null);
@@ -323,6 +340,22 @@ export function App() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const refreshVaultStatus = useCallback(async () => {
+    try {
+      setVaultStatus(await api.getVaultStatus());
+    } catch {
+      // The browser fallback and older installed builds may not expose the vault command yet.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshVaultStatus();
+    const timer = window.setInterval(() => {
+      void refreshVaultStatus();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshVaultStatus]);
 
   // Backend pushes a fresh snapshot when a login finishes / a background auto-switch happens.
   useEffect(() => {
@@ -434,17 +467,7 @@ export function App() {
 
   useEffect(() => {
     return subscribeToTauriEvent<LoginPromptEvent>("login-prompt", (event) => {
-      setLoginPrompt((current) => {
-        const next =
-          current?.accountId === event.payload.accountId
-            ? {
-                ...current,
-                loginUrl: event.payload.loginUrl ?? current.loginUrl,
-                deviceCode: event.payload.deviceCode ?? current.deviceCode,
-              }
-            : event.payload;
-        return next;
-      });
+      setLoginPrompt((current) => mergeLoginPrompt(current, event.payload));
       // Announced outside the updater: React double-invokes updaters under StrictMode, which
       // fired this toast twice in dev.
       const code = event.payload.deviceCode;
@@ -454,6 +477,32 @@ export function App() {
       }
     });
   }, [notify]);
+
+  useEffect(() => {
+    return subscribeToTauriEvent<LoginPromptFinishedEvent>(
+      "login-prompt-finished",
+      (event) => {
+        setLoginPrompt((current) =>
+          finishLoginPrompt(current, event.payload),
+        );
+      },
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!loginPrompt) return;
+    const reconciled = reconcileLoginPromptWithTools(
+      loginPrompt,
+      snapshot.tools,
+    );
+    if (!reconciled) {
+      setLoginPrompt(null);
+    }
+  }, [loginPrompt, snapshot.tools]);
+
+  useEffect(() => {
+    if (!loginPrompt) announcedDeviceCode.current = null;
+  }, [loginPrompt]);
 
   useEffect(() => {
     if (!snapshot.disclaimerAccepted || dialog) return;
@@ -490,6 +539,36 @@ export function App() {
         threshold: snapshot.autoSwitchThreshold,
       }
     : { enabled: false, threshold: 100 };
+  const activeAccount = visibleCurrentAccounts.find(
+    (account) => account.id === currentTool?.activeAccountId || account.state === "active",
+  );
+  const reportingAccountCount = visibleCurrentAccounts.filter(
+    (account) =>
+      account.quota &&
+      (account.quota.fiveHour.percentUsed !== null || account.quota.weekly.percentUsed !== null),
+  ).length;
+  const attentionAccountCount = visibleCurrentAccounts.filter((account) => {
+    if (account.state === "needsLogin" || account.state === "exhausted") return true;
+    const quota = account.quota;
+    if (quota?.error) return true;
+    return (
+      (quota?.fiveHour.percentUsed ?? 0) >= 90 ||
+      (quota?.weekly.percentUsed ?? 0) >= 90
+    );
+  }).length;
+  const accountCountLabel = `${visibleCurrentAccounts.length} account${visibleCurrentAccounts.length === 1 ? "" : "s"}`;
+  const attentionLabel =
+    attentionAccountCount > 0
+      ? `${attentionAccountCount} need${attentionAccountCount === 1 ? "s" : ""} attention`
+      : "Healthy";
+  const viewLabel =
+    view === "accounts"
+      ? `${currentTool?.name ?? "Accounts"} / Accounts`
+      : view === "api"
+        ? "Workspace / API Gateway"
+        : view === "usage"
+          ? "Workspace / Usage"
+          : "System / Settings";
 
   useEffect(() => {
     if (currentTool && currentTool.id !== selectedTool) {
@@ -523,6 +602,62 @@ export function App() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const vaultAction = async <T,>(task: () => Promise<T>, success?: string): Promise<T | null> => {
+    setBusy("vault");
+    setError(null);
+    try {
+      const result = await task();
+      if (success) notify(success, "success");
+      return result;
+    } catch (err) {
+      void refreshVaultStatus();
+      notify(errorMessage(err), "error");
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const initializeVault = async (passkey: string) => {
+    const next = await vaultAction(() => api.initializeVault(passkey), "Secure vault created");
+    if (next) {
+      setVaultStatus(next);
+      return true;
+    }
+    return false;
+  };
+
+  const unlockVault = async (passkey: string) => {
+    const next = await vaultAction(() => api.unlockVault(passkey), "Secure vault unlocked");
+    if (next) {
+      setVaultStatus(next);
+      return true;
+    }
+    return false;
+  };
+
+  const lockVault = async () => {
+    const ok = await vaultAction(async () => {
+      await api.lockVault();
+      return true;
+    }, "Secure vault locked");
+    if (ok) setVaultStatus((current) => ({ ...current, unlocked: false, recordCount: 0 }));
+  };
+
+  const loadVaultCredential = async (account: Account) =>
+    vaultAction(
+      () => api.getVaultCredential(account.toolId, account.id),
+    );
+
+  const saveVaultCredential = async (input: VaultCredentialInput) => {
+    const saved = await vaultAction(() => api.saveVaultCredential(input), "Credentials saved securely");
+    if (saved) {
+      await refreshVaultStatus();
+      return true;
+    }
+    return false;
   };
 
   const refreshOneAccount = async (toolId: ToolId, accountId: string) => {
@@ -561,7 +696,7 @@ export function App() {
     if (!tool) return;
     // Fire all account refreshes in parallel so each card updates independently.
     for (const account of tool.accounts) {
-      if (account.state !== "needs-login" && !account.apiProvider) {
+      if (account.state !== "needsLogin" && !account.apiProvider) {
         void refreshOneAccount(selectedTool, account.id);
       }
     }
@@ -594,6 +729,11 @@ export function App() {
           >
             <img src={logoUrl} alt="" />
             <span>AI Account Switcher</span>
+          </div>
+          <div className="workbenchCommand" aria-label={`Current workspace: ${viewLabel}`}>
+            <Code2 aria-hidden />
+            <span>{viewLabel}</span>
+            <kbd>F11</kbd>
           </div>
           <div className="windowControls">
             <AccountThemeToggle value={accountTheme} onChange={setAccountTheme} />
@@ -705,86 +845,141 @@ export function App() {
       )}
 
       <div className="workspace">
+        <nav className="activityRail" aria-label="Primary views">
+          <button
+            type="button"
+            className={view === "accounts" ? "selected" : ""}
+            aria-current={view === "accounts" ? "page" : undefined}
+            aria-label="Accounts"
+            title="Accounts"
+            onClick={() => setView("accounts")}
+          >
+            <Users />
+          </button>
+          <button
+            type="button"
+            className={view === "api" ? "selected" : ""}
+            aria-current={view === "api" ? "page" : undefined}
+            aria-label="API gateway"
+            title="API gateway"
+            onClick={() => setView("api")}
+          >
+            <Server />
+          </button>
+          <button
+            type="button"
+            className={view === "usage" ? "selected" : ""}
+            aria-current={view === "usage" ? "page" : undefined}
+            aria-label="Usage"
+            title="Usage"
+            onClick={() => setView("usage")}
+          >
+            <BarChart3 />
+          </button>
+          <span className="activityRailSpacer" />
+          <button
+            type="button"
+            className={view === "settings" ? "selected" : ""}
+            aria-current={view === "settings" ? "page" : undefined}
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => setView("settings")}
+          >
+            <Settings />
+          </button>
+        </nav>
         <aside className="sidebar">
           <div className="sidebarBrand">
             <span className="sidebarBrandMark" aria-hidden>
               <img src={logoUrl} alt="" />
             </span>
-            <strong>AI ACCOUNT SWITCHER</strong>
+            <span className="sidebarBrandCopy">
+              <strong>AI SWITCHER</strong>
+              <small>Tokyo workbench</small>
+            </span>
             <span className="sidebarBrandRule" aria-hidden />
           </div>
 
           <div className="sidebarNav">
-            {snapshot.tools.map((tool, index) => (
+            <div className="sidebarNavGroup">
+              <span className="sidebarNavLabel">Accounts</span>
+              {snapshot.tools.map((tool, index) => (
+                <button
+                  aria-current={view === "accounts" && tool.id === selectedTool ? "page" : undefined}
+                  className={`toolTab ${view === "accounts" && tool.id === selectedTool ? "selected" : ""}`}
+                  key={tool.id}
+                  onClick={() => {
+                    setView("accounts");
+                    setSelectedTool(tool.id);
+                  }}
+                >
+                  <span className="sidebarNavIcon" aria-hidden>
+                    {tool.id === "codex" ? <Code2 /> : <Boxes />}
+                  </span>
+                  <span className="sidebarNavCopy">
+                    <strong>{tool.name}</strong>
+                    <small>{tool.installed ? "Accounts" : "Tool not installed"}</small>
+                  </span>
+                  <span className="sidebarNavIndex" aria-hidden>
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="sidebarNavGroup">
+              <span className="sidebarNavLabel">Workspace</span>
               <button
-                aria-current={view === "accounts" && tool.id === selectedTool ? "page" : undefined}
-                className={`toolTab ${view === "accounts" && tool.id === selectedTool ? "selected" : ""}`}
-                key={tool.id}
-                onClick={() => {
-                  setView("accounts");
-                  setSelectedTool(tool.id);
-                }}
+                aria-current={view === "api" ? "page" : undefined}
+                className={`toolTab ${view === "api" ? "selected" : ""}`}
+                onClick={() => setView("api")}
               >
                 <span className="sidebarNavIcon" aria-hidden>
-                  {tool.id === "codex" ? <Code2 /> : <Boxes />}
+                  <Server />
                 </span>
                 <span className="sidebarNavCopy">
-                  <strong>{tool.name}</strong>
-                  <small>{tool.installed ? "Accounts" : "Tool not installed"}</small>
+                  <strong>API</strong>
+                  <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
                 </span>
                 <span className="sidebarNavIndex" aria-hidden>
-                  {String(index + 1).padStart(2, "0")}
+                  {String(snapshot.tools.length + 1).padStart(2, "0")}
                 </span>
               </button>
-            ))}
-            <button
-              aria-current={view === "api" ? "page" : undefined}
-              className={`toolTab ${view === "api" ? "selected" : ""}`}
-              onClick={() => setView("api")}
-            >
-              <span className="sidebarNavIcon" aria-hidden>
-                <Server />
-              </span>
-              <span className="sidebarNavCopy">
-                <strong>API</strong>
-                <small>{snapshot.apiGateway.status.state === "running" ? "Server running" : "Local gateway"}</small>
-              </span>
-              <span className="sidebarNavIndex" aria-hidden>
-                {String(snapshot.tools.length + 1).padStart(2, "0")}
-              </span>
-            </button>
-            <button
-              aria-current={view === "usage" ? "page" : undefined}
-              className={`toolTab ${view === "usage" ? "selected" : ""}`}
-              onClick={() => setView("usage")}
-            >
-              <span className="sidebarNavIcon" aria-hidden>
-                <BarChart3 />
-              </span>
-              <span className="sidebarNavCopy">
-                <strong>Usage</strong>
-                <small>Token &amp; cost</small>
-              </span>
-              <span className="sidebarNavIndex" aria-hidden>
-                {String(snapshot.tools.length + 2).padStart(2, "0")}
-              </span>
-            </button>
-            <button
-              aria-current={view === "settings" ? "page" : undefined}
-              className={`toolTab ${view === "settings" ? "selected" : ""}`}
-              onClick={() => setView("settings")}
-            >
-              <span className="sidebarNavIcon" aria-hidden>
-                <Settings />
-              </span>
-              <span className="sidebarNavCopy">
-                <strong>Settings</strong>
-                <small>CLI paths</small>
-              </span>
-              <span className="sidebarNavIndex" aria-hidden>
-                {String(snapshot.tools.length + 3).padStart(2, "0")}
-              </span>
-            </button>
+              <button
+                aria-current={view === "usage" ? "page" : undefined}
+                className={`toolTab ${view === "usage" ? "selected" : ""}`}
+                onClick={() => setView("usage")}
+              >
+                <span className="sidebarNavIcon" aria-hidden>
+                  <BarChart3 />
+                </span>
+                <span className="sidebarNavCopy">
+                  <strong>Usage</strong>
+                  <small>Token &amp; cost</small>
+                </span>
+                <span className="sidebarNavIndex" aria-hidden>
+                  {String(snapshot.tools.length + 2).padStart(2, "0")}
+                </span>
+              </button>
+            </div>
+            <div className="sidebarNavGroup">
+              <span className="sidebarNavLabel">System</span>
+              <button
+                aria-current={view === "settings" ? "page" : undefined}
+                className={`toolTab ${view === "settings" ? "selected" : ""}`}
+                onClick={() => setView("settings")}
+              >
+                <span className="sidebarNavIcon" aria-hidden>
+                  <Settings />
+                </span>
+                <span className="sidebarNavCopy">
+                  <strong>Settings</strong>
+                  <small>CLI paths</small>
+                </span>
+                <span className="sidebarNavIndex" aria-hidden>
+                  {String(snapshot.tools.length + 3).padStart(2, "0")}
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="sidebarEtching" aria-hidden>
@@ -863,6 +1058,7 @@ export function App() {
           <SettingsView
             snapshot={snapshot}
             busy={busy !== null}
+            vaultStatus={vaultStatus}
             onSetup={(toolId) => {
               setSelectedTool(toolId);
               setDialog("setup");
@@ -873,6 +1069,9 @@ export function App() {
             onLaunchWithWindowsChange={(enabled) =>
               run("launchWithWindows", () => api.setLaunchWithWindows(enabled))
             }
+            onInitializeVault={initializeVault}
+            onUnlockVault={unlockVault}
+            onLockVault={lockVault}
           />
         )}
 
@@ -880,6 +1079,11 @@ export function App() {
           <section className="panel">
             <div className="panelHead">
               <div>
+                <div className="workbenchBreadcrumb">
+                  <span>Accounts</span>
+                  <span aria-hidden>/</span>
+                  <strong>{currentTool.name}</strong>
+                </div>
                 <div className="titleRow">
                   <h2>{currentTool.name}</h2>
                   <span className={`status ${currentTool.installed ? "ok" : "muted"}`}>
@@ -939,6 +1143,31 @@ export function App() {
               </div>
             </div>
 
+            <section className="accountSummary" aria-label={`${currentTool.name} account summary`}>
+              <div className={`summaryMetric ${activeAccount ? "summaryMetric--active" : ""}`}>
+                <span>Active profile</span>
+                <strong>{activeAccount?.name ?? "No profile"}</strong>
+                <small>{activeAccount?.launcherCommand ?? `${currentTool.id} default`}</small>
+              </div>
+              <div className="summaryMetric">
+                <span>Workspace</span>
+                <strong>{accountCountLabel}</strong>
+                <small>{currentTool.installed ? "CLI connected" : "Setup required"}</small>
+              </div>
+              <div className={`summaryMetric ${attentionAccountCount > 0 ? "summaryMetric--attention" : ""}`}>
+                <span>Quota health</span>
+                <strong>{attentionLabel}</strong>
+                <small>{reportingAccountCount}/{visibleCurrentAccounts.length || 0} reporting</small>
+              </div>
+              <div className="summaryMetric summaryMetric--secondary">
+                <span>Auto-switch</span>
+                <strong>{currentAutoSwitch.enabled ? `${currentAutoSwitch.threshold}% threshold` : "Off"}</strong>
+                <small title={`Auto-switch the bare ${currentTool.id} command when quota reaches the threshold`}>
+                  Bare {currentTool.id} command
+                </small>
+              </div>
+            </section>
+
             {switchNotice && (
               <div className="drift">
                 <CircleHelp />
@@ -976,6 +1205,10 @@ export function App() {
                       const ok = await copyToClipboard(text);
                       notify(ok ? `Copied: ${text}` : "Couldn't access the clipboard.", ok ? "success" : "error");
                     }}
+                    onCredentials={() => {
+                      setSelectedAccount(account);
+                      setDialog("credentials");
+                    }}
                     onDelete={() =>
                       run("delete", () => api.deleteAccount(currentTool.id, account.id))
                     }
@@ -996,6 +1229,17 @@ export function App() {
           </section>
         )}
       </div>
+
+      <footer className="workbenchStatusBar" aria-label="Workbench status">
+        <span className="statusBarBranch"><Code2 aria-hidden /> {viewLabel}</span>
+        <span><Users aria-hidden /> {currentTool ? accountCountLabel : "No accounts"}</span>
+        <span className={snapshot.apiGateway.status.state === "running" ? "statusBarOnline" : ""}>
+          <Server aria-hidden /> Gateway {snapshot.apiGateway.status.state}
+        </span>
+        <span className="statusBarSpacer" />
+        <span>{currentAutoSwitch.enabled ? `Auto-switch ${currentAutoSwitch.threshold}%` : "Auto-switch off"}</span>
+        <span>{version ? `v${version}` : "dev"}</span>
+      </footer>
 
       {dialog === "add" && currentTool && (
         <AddDialog
@@ -1067,6 +1311,22 @@ export function App() {
           }}
         />
       )}
+
+      {dialog === "credentials" && selectedAccount && (
+        <CredentialsDialog
+          account={selectedAccount}
+          vaultStatus={vaultStatus}
+          onClose={() => setDialog(null)}
+          onInitializeVault={initializeVault}
+          onUnlockVault={unlockVault}
+          onLoad={loadVaultCredential}
+          onSave={async (input) => {
+            const ok = await saveVaultCredential(input);
+            if (ok) setDialog(null);
+            return ok;
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -1074,15 +1334,23 @@ export function App() {
 function SettingsView({
   snapshot,
   busy,
+  vaultStatus,
   onSetup,
   onAutoSwitchChange,
   onLaunchWithWindowsChange,
+  onInitializeVault,
+  onUnlockVault,
+  onLockVault,
 }: {
   snapshot: AppSnapshot;
   busy: boolean;
+  vaultStatus: VaultStatus;
   onSetup: (toolId: ToolId) => void;
   onAutoSwitchChange: (toolId: ToolId, enabled: boolean, threshold: number) => void;
   onLaunchWithWindowsChange: (enabled: boolean) => void;
+  onInitializeVault: (passkey: string) => Promise<boolean>;
+  onUnlockVault: (passkey: string) => Promise<boolean>;
+  onLockVault: () => Promise<void>;
 }) {
   const cliTools = snapshot.tools.filter((tool) => tool.id !== "antigravity");
   return (
@@ -1097,6 +1365,13 @@ function SettingsView({
       </div>
 
       <div className="settingsList">
+        <VaultSettingsCard
+          status={vaultStatus}
+          busy={busy}
+          onInitialize={onInitializeVault}
+          onUnlock={onUnlockVault}
+          onLock={onLockVault}
+        />
         {cliTools.map((tool) => (
           <CliSetupBar
             key={tool.id}
@@ -1149,6 +1424,97 @@ function SettingsView({
         </div>
       </div>
     </section>
+  );
+}
+
+function VaultSettingsCard({
+  status,
+  busy,
+  onInitialize,
+  onUnlock,
+  onLock,
+}: {
+  status: VaultStatus;
+  busy: boolean;
+  onInitialize: (passkey: string) => Promise<boolean>;
+  onUnlock: (passkey: string) => Promise<boolean>;
+  onLock: () => Promise<void>;
+}) {
+  const [passkey, setPasskey] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const setup = !status.configured;
+
+  const submit = async () => {
+    setMessage(null);
+    if (passkey.length < 8) {
+      setMessage("Passkey must be at least 8 characters");
+      return;
+    }
+    if (setup && passkey !== confirm) {
+      setMessage("Passkeys do not match");
+      return;
+    }
+    const ok = setup ? await onInitialize(passkey) : await onUnlock(passkey);
+    if (ok) {
+      setPasskey("");
+      setConfirm("");
+    }
+  };
+
+  return (
+    <div className="settingsSection vaultSettings" data-vault-state={status.unlocked ? "unlocked" : "locked"}>
+      <div className="settingsSectionHead">
+        <span className="settingsSectionIcon" aria-hidden>
+          {status.unlocked ? <KeyRound /> : <LockKeyhole />}
+        </span>
+        <div>
+          <strong>Secure vault</strong>
+          <small>
+            {setup
+              ? "Create an encrypted vault for account email, password and 2FA secrets."
+              : status.unlocked
+                ? `${status.recordCount} saved credential${status.recordCount === 1 ? "" : "s"} · vault unlocked for this session.`
+                : "Credentials stay encrypted on disk and require the vault passkey to view."}
+          </small>
+        </div>
+        {!setup && status.unlocked && (
+          <button type="button" className="secondaryAction vaultLockButton" onClick={() => void onLock()} disabled={busy}>
+            <LockKeyhole /> Lock
+          </button>
+        )}
+      </div>
+      {!status.unlocked && (
+        <div className="vaultUnlockRow">
+          <label>
+            <span>{setup ? "Create passkey" : "Vault passkey"}</span>
+            <input
+              type="password"
+              value={passkey}
+              onChange={(event) => setPasskey(event.target.value)}
+              placeholder={setup ? "At least 8 characters" : "Enter passkey"}
+              autoComplete="new-password"
+            />
+          </label>
+          {setup && (
+            <label>
+              <span>Confirm passkey</span>
+              <input
+                type="password"
+                value={confirm}
+                onChange={(event) => setConfirm(event.target.value)}
+                placeholder="Repeat passkey"
+                autoComplete="new-password"
+              />
+            </label>
+          )}
+          <button type="button" className="primaryAction" onClick={() => void submit()} disabled={busy}>
+            <KeyRound /> {setup ? "Create vault" : "Unlock vault"}
+          </button>
+        </div>
+      )}
+      {message && <p className="quotaError">{message}</p>}
+    </div>
   );
 }
 
@@ -1244,7 +1610,7 @@ function ApiGatewayView({
               (account) =>
                 !account.apiProvider &&
                 account.fingerprint !== "api-local" &&
-                account.state !== "needs-login",
+                account.state !== "needsLogin",
             )
             .map((account) => {
               const entry = gateway.config.accounts.find(
@@ -2108,14 +2474,17 @@ function CliSetupBar({
   onOpen: () => void;
 }) {
   const ready = !!setup?.binaryPath && !!setup?.defaultConfigDir;
+  const fullPaths = ready
+    ? `${normalizePathForDisplay(setup!.binaryPath!)} · ${normalizePathForDisplay(setup!.defaultConfigDir!)}`
+    : undefined;
   return (
     <div className={`cliSetup ${ready ? "ready" : "needsSetup"}`}>
       <Terminal />
       <div className="cliSetupText">
         <strong>{ready ? "CLI setup resolved" : "CLI setup needs review"}</strong>
-        <small>
+        <small title={fullPaths}>
           {ready
-            ? `${shortPath(setup!.binaryPath!)} · ${shortPath(setup!.defaultConfigDir!)}`
+            ? `${formatPathForDisplay(setup!.binaryPath!)} · ${formatPathForDisplay(setup!.defaultConfigDir!)}`
             : `Set where ${tool.name} is installed and where its main config lives.`}
         </small>
       </div>
@@ -2133,6 +2502,7 @@ function AccountCard({
   onSwitch,
   onRename,
   onSetLauncher,
+  onCredentials,
   onCopy,
   onDelete,
   onRefreshQuota,
@@ -2145,6 +2515,7 @@ function AccountCard({
   onSwitch: () => void;
   onRename: () => void;
   onSetLauncher: () => void;
+  onCredentials: () => void;
   onCopy: (text: string) => void;
   onDelete: () => void;
   onRefreshQuota: () => void;
@@ -2156,7 +2527,7 @@ function AccountCard({
   const isVirtualApi = account.fingerprint === "api-local";
   const isActive = account.id === tool.activeAccountId || account.state === "active";
   const exhausted = account.state === "exhausted";
-  const needsLogin = account.state === "needs-login";
+  const needsLogin = account.state === "needsLogin";
   const canReauthenticate = needsLogin && tool.id === "codex" && !account.isDefault && !isApi;
 
   return (
@@ -2240,6 +2611,16 @@ function AccountCard({
         <button onClick={onSwitch} disabled={isActive || needsLogin || busy !== null}>
           <RotateCcw /> Use
         </button>
+        {!isVirtualApi && !isApi && (
+          <button
+            className="iconButton vaultAction"
+            onClick={onCredentials}
+            disabled={busy !== null}
+            title="Secure credentials"
+          >
+            <KeyRound />
+          </button>
+        )}
         {!isApi && !needsLogin && (
           <button
             className="iconButton"
@@ -2277,6 +2658,214 @@ function AccountCard({
         )}
       </div>
     </article>
+  );
+}
+
+function CredentialsDialog({
+  account,
+  vaultStatus,
+  onClose,
+  onInitializeVault,
+  onUnlockVault,
+  onLoad,
+  onSave,
+}: {
+  account: Account;
+  vaultStatus: VaultStatus;
+  onClose: () => void;
+  onInitializeVault: (passkey: string) => Promise<boolean>;
+  onUnlockVault: (passkey: string) => Promise<boolean>;
+  onLoad: (account: Account) => Promise<VaultCredential | null>;
+  onSave: (input: VaultCredentialInput) => Promise<boolean>;
+}) {
+  const [passkey, setPasskey] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [totpSecret, setTotpSecret] = useState("");
+  const [source, setSource] = useState("");
+  const [notes, setNotes] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showTotp, setShowTotp] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const needsSetup = !vaultStatus.configured;
+
+  useEffect(() => {
+    if (vaultStatus.unlocked) return;
+    setPasskey("");
+    setConfirm("");
+    setPassword("");
+    setTotpSecret("");
+    setShowPassword(false);
+    setShowTotp(false);
+  }, [vaultStatus.unlocked]);
+
+  useEffect(() => {
+    if (!vaultStatus.unlocked) return;
+    let cancelled = false;
+    setLoading(true);
+    void onLoad(account)
+      .then((saved) => {
+        if (cancelled || !saved) return;
+        setUsername(saved.username);
+        setPassword(saved.password);
+        setTotpSecret(saved.totpSecret);
+        setSource(saved.source);
+        setNotes(saved.notes);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [account.id, account.toolId, vaultStatus.unlocked]);
+
+  const unlock = async () => {
+    setMessage(null);
+    if (passkey.length < 8) {
+      setMessage("Passkey must be at least 8 characters");
+      return;
+    }
+    if (needsSetup && passkey !== confirm) {
+      setMessage("Passkeys do not match");
+      return;
+    }
+    const ok = needsSetup ? await onInitializeVault(passkey) : await onUnlockVault(passkey);
+    if (ok) {
+      setPasskey("");
+      setConfirm("");
+      setMessage(null);
+    }
+  };
+
+  const submit = async () => {
+    setMessage(null);
+    if (!username.trim()) {
+      setMessage("Username or email is required");
+      return;
+    }
+    if (!password) {
+      setMessage("Password is required");
+      return;
+    }
+    await onSave({
+      toolId: account.toolId,
+      accountId: account.id,
+      username: username.trim(),
+      password,
+      totpSecret: totpSecret.trim(),
+      source: source.trim(),
+      notes: notes.trim(),
+    });
+  };
+
+  return (
+    <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal credentialsModal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="credentialsModalHead">
+          <div>
+            <span className="eyebrow">Secure vault</span>
+            <h2>{account.name}</h2>
+            <p>Store details manually for this account. OAuth/device-code login is never scraped.</p>
+          </div>
+          <LockKeyhole aria-hidden />
+        </div>
+
+        {!vaultStatus.unlocked ? (
+          <div className="vaultGate">
+            <strong>{needsSetup ? "Create the vault passkey" : "Unlock the vault"}</strong>
+            <small>
+              {needsSetup
+                ? "Use a passkey you can remember. Without it, the encrypted file cannot be opened."
+                : "The account details remain encrypted until this passkey is verified."}
+            </small>
+            <label>
+              {needsSetup ? "Create passkey" : "Passkey"}
+              <input
+                autoFocus
+                type="password"
+                value={passkey}
+                onChange={(event) => setPasskey(event.target.value)}
+                autoComplete={needsSetup ? "new-password" : "current-password"}
+              />
+            </label>
+            {needsSetup && (
+              <label>
+                Confirm passkey
+                <input
+                  type="password"
+                  value={confirm}
+                  onChange={(event) => setConfirm(event.target.value)}
+                  autoComplete="new-password"
+                />
+              </label>
+            )}
+            {message && <p className="quotaError">{message}</p>}
+            <div className="modalActions">
+              <button type="button" onClick={onClose}>Cancel</button>
+              <button type="button" className="primary" onClick={() => void unlock()}>
+                <KeyRound /> {needsSetup ? "Create & continue" : "Unlock"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="credentialFields">
+              <label>
+                Username or email
+                <input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} />
+              </label>
+              <label>
+                Password
+                <span className="sensitiveInput">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <button type="button" className="iconButton" onClick={() => setShowPassword((value) => !value)} title={showPassword ? "Hide password" : "Reveal password"}>
+                    {showPassword ? <EyeOff /> : <Eye />}
+                  </button>
+                </span>
+              </label>
+              <label>
+                2FA secret <small>(optional TOTP seed)</small>
+                <span className="sensitiveInput">
+                  <input
+                    type={showTotp ? "text" : "password"}
+                    value={totpSecret}
+                    onChange={(event) => setTotpSecret(event.target.value)}
+                    autoComplete="off"
+                  />
+                  <button type="button" className="iconButton" onClick={() => setShowTotp((value) => !value)} title={showTotp ? "Hide 2FA secret" : "Reveal 2FA secret"}>
+                    {showTotp ? <EyeOff /> : <Eye />}
+                  </button>
+                </span>
+              </label>
+              <label>
+                Where it came from <small>(optional)</small>
+                <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="Shop, seller or platform" />
+              </label>
+              <label>
+                Notes <small>(optional)</small>
+                <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} placeholder="Plan, renewal date, or other reminder" />
+              </label>
+            </div>
+            {message && <p className="quotaError">{message}</p>}
+            <div className="modalActions">
+              <button type="button" onClick={onClose}>Cancel</button>
+              <button type="button" className="primary" onClick={() => void submit()} disabled={loading}>
+                {loading ? <Loader2 className="spin" /> : <KeyRound />} Save securely
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -2887,7 +3476,9 @@ function ReadOnlyPath({ label, value }: { label: string; value: string }) {
   return (
     <div className="readonlyPath">
       <span>{label}</span>
-      <code>{value}</code>
+      <code title={normalizePathForDisplay(value)}>
+        {formatPathForDisplay(value)}
+      </code>
     </div>
   );
 }
@@ -2918,7 +3509,9 @@ function CandidateList({
             className={`candidate ${selected === item.path ? "selected" : ""} ${item.valid ? "" : "weak"}`}
             onClick={() => onSelect(item.path)}
           >
-            <span className="candidatePath">{item.path}</span>
+            <span className="candidatePath" title={normalizePathForDisplay(item.path)}>
+              {formatPathForDisplay(item.path)}
+            </span>
             <span className="candidateMeta">
               {candidateLabel(item, index, kind)}
             </span>
@@ -2931,7 +3524,7 @@ function CandidateList({
 }
 
 function stateLabel(state: Account["state"]) {
-  if (state === "needs-login") return "Signing in";
+  if (state === "needsLogin") return "Signing in";
   if (state === "exhausted") return "Out of quota";
   if (state === "active") return "In use";
   return "Ready";
@@ -2940,17 +3533,8 @@ function stateLabel(state: Account["state"]) {
 function badgeClass(state: Account["state"]) {
   if (state === "active") return "ok";
   if (state === "exhausted") return "warn";
-  if (state === "needs-login") return "bad";
+  if (state === "needsLogin") return "bad";
   return "muted";
-}
-
-function shortPath(path: string) {
-  const home = "/Users/";
-  if (path.startsWith(home)) {
-    const parts = path.split("/");
-    if (parts.length > 3) return `~/${parts.slice(3).join("/")}`;
-  }
-  return path.length > 58 ? `…${path.slice(-55)}` : path;
 }
 
 function sourceLabel(source: string) {

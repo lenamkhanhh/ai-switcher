@@ -51,6 +51,12 @@ impl PriceTable {
     /// Look up a model's price, tolerating small name differences between the CLI logs and
     /// LiteLLM keys (provider prefix, trailing `-YYYYMMDD` date).
     pub fn lookup(&self, model: &str) -> Option<ModelPrice> {
+        // Codex writes this logical mode into turn_context for automatic code reviews. OpenAI's
+        // Codex rate card specifies that Code Review uses GPT-5.3-Codex.
+        let model = match model {
+            "codex-auto-review" => "gpt-5.3-codex",
+            _ => model,
+        };
         if let Some(price) = self.models.get(model) {
             return Some(*price);
         }
@@ -192,6 +198,11 @@ mod tests {
                 "input_cost_per_token": 0.00000125,
                 "output_cost_per_token": 0.00001,
                 "cache_read_input_token_cost": 0.000000125
+            },
+            "gpt-5.3-codex": {
+                "input_cost_per_token": 0.00000175,
+                "output_cost_per_token": 0.000014,
+                "cache_read_input_token_cost": 0.000000175
             }
         }"#;
         parse_table(body, "live", None)
@@ -235,5 +246,20 @@ mod tests {
         assert!(table
             .cost("some-unknown-model", &TokenBreakdown::default())
             .is_none());
+    }
+
+    #[test]
+    fn codex_auto_review_uses_code_review_price() {
+        let table = sample_table();
+        let expected = table
+            .lookup("gpt-5.3-codex")
+            .expect("sample includes the documented Codex code-review model");
+        let actual = table
+            .lookup("codex-auto-review")
+            .expect("logical auto-review mode resolves to its billable model");
+
+        assert_eq!(actual.input, expected.input);
+        assert_eq!(actual.output, expected.output);
+        assert_eq!(actual.cache_read, expected.cache_read);
     }
 }

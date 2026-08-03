@@ -2,7 +2,8 @@ export type ToolId = "claude" | "codex" | "antigravity";
 export type CodexLoginMethod = "deviceCode" | "browserProfile";
 export type UsageToolId = ToolId | "all";
 
-export type AccountState = "idle" | "active" | "exhausted" | "needs-login";
+/** Matches Rust AccountState serialization (`#[serde(rename_all = "camelCase")]`). */
+export type AccountState = "idle" | "active" | "exhausted" | "needsLogin";
 
 export interface QuotaWindow {
   label: string;
@@ -283,6 +284,42 @@ export interface AddAccountInput {
   launcher?: string;
   /** Codex-only. Omitted values retain the device-code flow. */
   codexLoginMethod?: CodexLoginMethod;
+}
+
+export interface VaultStatus {
+  configured: boolean;
+  unlocked: boolean;
+  recordCount: number;
+}
+
+export interface VaultCredentialSummary {
+  toolId: ToolId;
+  accountId: string;
+  username: string;
+  source: string;
+  notes: string;
+  updatedAt: string;
+}
+
+export interface VaultCredential {
+  toolId: ToolId;
+  accountId: string;
+  username: string;
+  password: string;
+  totpSecret: string;
+  source: string;
+  notes: string;
+  updatedAt: string;
+}
+
+export interface VaultCredentialInput {
+  toolId: ToolId;
+  accountId: string;
+  username: string;
+  password: string;
+  totpSecret?: string;
+  source?: string;
+  notes?: string;
 }
 
 export interface AddApiAccountInput {

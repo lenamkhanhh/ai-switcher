@@ -29,7 +29,7 @@ const MAX_SESSIONS: usize = 30;
 
 /// Bump when the cache format or scan logic changes in a way that invalidates old aggregates
 /// (e.g. the symlink-dedup fix) so a stale cache is discarded instead of double-counting.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // On-disk incremental cache
@@ -132,10 +132,10 @@ pub fn build_reports(
 ) -> UsageReports {
     let mut cache = load_cache(cache_path);
 
-    // A file that is now shorter than its recorded cursor was rotated, truncated or replaced. Its
-    // old lines are already baked into the cumulative buckets and can't be subtracted, so reading
-    // the replacement from byte 0 would add them a second time. Rebuild everything instead.
-    if tracked_file_shrank(&cache) {
+    // A tracked file that disappeared or is now shorter was archived, rotated, truncated or
+    // replaced. Its old lines are already baked into cumulative buckets and cannot be subtracted,
+    // so retaining the cache would keep stale usage or double-count a replacement.
+    if tracked_file_invalidates_cache(&cache) {
         cache = UsageCache::default();
     }
 
@@ -181,14 +181,12 @@ pub fn build_reports(
 // Incremental file reading
 // ---------------------------------------------------------------------------
 
-/// True when a file the cache has already read is now shorter than the cursor into it, i.e. it was
-/// rotated, truncated or replaced. Buckets and sessions are cumulative, so the old contribution
-/// can't be subtracted from them — the only correct response is to rebuild the whole cache.
-fn tracked_file_shrank(cache: &UsageCache) -> bool {
-    cache
-        .files
-        .iter()
-        .any(|(path, cursor)| std::fs::metadata(path).is_ok_and(|meta| meta.len() < cursor.offset))
+/// True when a tracked file disappeared or became shorter than its cursor. Buckets and sessions
+/// are cumulative, so the old per-file contribution cannot be subtracted.
+fn tracked_file_invalidates_cache(cache: &UsageCache) -> bool {
+    cache.files.iter().any(|(path, cursor)| {
+        std::fs::metadata(path).map_or(true, |meta| meta.len() < cursor.offset)
+    })
 }
 
 /// Reads the bytes appended since `offset`. Returns the complete lines plus the new offset
@@ -371,6 +369,19 @@ fn scan_codex_file(path: &Path, cache: &mut UsageCache) {
         return;
     };
 
+    // Freshly scanned rollouts can emit a cumulative token_count before their first
+    // turn_context. Seed only an unknown cursor from the first model declared in this unread
+    // batch, then continue applying later model changes in line order.
+    if model == "unknown" {
+        if let Some(first_model) = lines.iter().find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| codex_model(&value))
+        }) {
+            model = first_model;
+        }
+    }
+
     let session_id = file_stem(path);
     for line in &lines {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -526,11 +537,9 @@ fn today_local() -> String {
 fn sum_cost(items: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     let mut total = 0.0;
     let mut any = false;
-    for item in items {
-        if let Some(value) = item {
-            total += value;
-            any = true;
-        }
+    for value in items.flatten() {
+        total += value;
+        any = true;
     }
     any.then_some(total)
 }
@@ -641,7 +650,7 @@ fn tool_usage(
             }
         })
         .collect();
-    by_model.sort_by(|a, b| b.tokens.total().cmp(&a.tokens.total()));
+    by_model.sort_by_key(|item| std::cmp::Reverse(item.tokens.total()));
 
     let total_cost_usd = sum_cost(by_model.iter().map(|m| m.cost_usd));
     let today_cost_usd = day_cost.get(today).copied().flatten();
@@ -752,6 +761,37 @@ mod tests {
         assert_eq!(total.cache_read, 90); // 40 + 50
         assert_eq!(total.output, 30); // 10 + 20
         assert_eq!(total.input, 160); // (100-40) + (150-50) = 60 + 100
+    }
+
+    #[test]
+    fn codex_leading_usage_uses_first_turn_context_model() {
+        // Some rollout files emit a cumulative token_count before their first turn_context.
+        // A cold cache rebuild must not permanently bucket that leading usage as "unknown".
+        let mut cache = UsageCache::default();
+        let tmp = std::env::temp_dir().join("aisw_codex_leading_usage.jsonl");
+        let content = concat!(
+            r#"{"timestamp":"2026-07-28T09:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-28T09:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":250,"cached_input_tokens":90,"output_tokens":30}}}}"#,
+            "\n",
+        );
+        std::fs::write(&tmp, content).unwrap();
+        scan_codex_file(&tmp, &mut cache);
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(
+            cache.buckets.keys().all(|key| !key.ends_with("|unknown")),
+            "leading usage should inherit the first model declared by the rollout"
+        );
+        let tokens = cache
+            .buckets
+            .get("codex|2026-07-28|gpt-5.6-sol")
+            .expect("all usage is attributed to the first declared model");
+        assert_eq!(tokens.input, 160);
+        assert_eq!(tokens.cache_read, 90);
+        assert_eq!(tokens.output, 30);
     }
 
     #[test]
@@ -940,14 +980,36 @@ mod tests {
         std::fs::write(&tmp, format!("{line}\n{line}\n")).unwrap();
         scan_claude_file(&tmp, &mut cache);
         assert!(
-            !tracked_file_shrank(&cache),
+            !tracked_file_invalidates_cache(&cache),
             "an untouched file is not stale"
         );
 
         // The log is rotated away and a shorter one takes its place.
         std::fs::write(&tmp, format!("{line}\n")).unwrap();
-        assert!(tracked_file_shrank(&cache));
+        assert!(tracked_file_invalidates_cache(&cache));
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn a_deleted_tracked_file_invalidates_the_cache() {
+        // Deleted/archived rollouts must not remain forever in cumulative buckets. Rebuilding is
+        // required because the cache does not store a reversible per-file contribution.
+        let mut cache = UsageCache::default();
+        let tmp = std::env::temp_dir().join("aisw_codex_deleted_usage.jsonl");
+        let content = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-28T09:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10}}}}"#,
+            "\n",
+        );
+        std::fs::write(&tmp, content).unwrap();
+        scan_codex_file(&tmp, &mut cache);
+        std::fs::remove_file(&tmp).unwrap();
+
+        assert!(
+            tracked_file_invalidates_cache(&cache),
+            "a missing tracked rollout must force a clean rebuild"
+        );
     }
 }

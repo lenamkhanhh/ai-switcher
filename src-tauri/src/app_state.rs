@@ -6,6 +6,7 @@ use crate::models::{
     DeleteApiGatewayKeyInput, DetectionReport, QuotaInfo, RenameAccountInput,
     SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
     StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport, UsageReports,
+    VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
 };
 use crate::quota::{codex_account_email, read_quota};
 use crate::store::{normalize_account_states, Store, StoredState};
@@ -20,16 +21,19 @@ use crate::tools::{
     sync_reauthenticated_codex_credentials, write_active_profile, write_api_key_file,
     write_api_launcher, write_claude_proxy_settings, write_codex_proxy_config, write_launcher,
 };
+use crate::vault::VaultService;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 pub struct ManagedState {
     pub store: Store,
     pub data: Mutex<StoredState>,
+    pub vault: VaultService,
     pub api_server: Mutex<crate::api_gateway::ApiServerHandle>,
     /// Per-rollout byte offsets for the Codex quota-error watcher.
     pub codex_quota_watch: Mutex<BTreeMap<String, u64>>,
@@ -62,9 +66,11 @@ impl ManagedState {
         autodetect_missing_tool_setups(&store, &mut data);
         store.save(&data)?;
         let server = crate::api_gateway::ApiServerHandle::stopped(&data.api_gateway);
+        let vault = VaultService::new(&store);
         let managed = Self {
             store,
             data: Mutex::new(data),
+            vault,
             api_server: Mutex::new(server),
             codex_quota_watch: Mutex::new(BTreeMap::new()),
             codex_active_rollout: Mutex::new(None),
@@ -182,6 +188,69 @@ impl ManagedState {
                 crate::api_gateway::ApiServerHandle::stopped(&snapshot_data.api_gateway).status
             });
         Ok(build_snapshot(&self.store, &snapshot_data, status))
+    }
+
+    pub fn vault_status(&self) -> Result<VaultStatus> {
+        self.vault.status()
+    }
+
+    pub fn initialize_vault(&self, passkey: String) -> Result<VaultStatus> {
+        let result = self.vault.initialize(&passkey);
+        let mut passkey = passkey;
+        passkey.zeroize();
+        result
+    }
+
+    pub fn unlock_vault(&self, passkey: String) -> Result<VaultStatus> {
+        let result = self.vault.unlock(&passkey);
+        let mut passkey = passkey;
+        passkey.zeroize();
+        result
+    }
+
+    pub fn lock_vault(&self) {
+        self.vault.lock();
+    }
+
+    pub fn list_vault_credentials(&self) -> Result<Vec<VaultCredentialSummary>> {
+        self.vault.list()
+    }
+
+    pub fn get_vault_credential(
+        &self,
+        tool_id: ToolId,
+        account_id: String,
+    ) -> Result<Option<VaultCredential>> {
+        self.validate_vault_account(&tool_id, &account_id)?;
+        self.vault.get(&tool_id, &account_id)
+    }
+
+    pub fn save_vault_credential(
+        &self,
+        input: VaultCredentialInput,
+    ) -> Result<VaultCredentialSummary> {
+        self.validate_vault_account(&input.tool_id, &input.account_id)?;
+        self.vault.save(input)
+    }
+
+    pub fn delete_vault_credential(&self, tool_id: ToolId, account_id: String) -> Result<()> {
+        self.vault.delete(&tool_id, &account_id)
+    }
+
+    fn validate_vault_account(&self, tool_id: &ToolId, account_id: &str) -> Result<()> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let account = data
+            .accounts
+            .iter()
+            .find(|account| account.tool_id == *tool_id && account.id == account_id)
+            .context("Account not found")?;
+        if account.api_provider.is_some() {
+            anyhow::bail!("API/proxy credentials are stored with the account profile");
+        }
+        Ok(())
     }
 
     pub fn start_api_gateway(&self, input: StartApiGatewayInput) -> Result<AppSnapshot> {
@@ -2221,6 +2290,9 @@ impl ManagedState {
             (account.launcher_command.clone(), was_active)
         };
 
+        // A configured vault must be unlocked before deleting an account so its matching secret
+        // record can be removed in the same user action instead of leaving an orphaned credential.
+        self.vault.ensure_unlocked_for_account_delete()?;
         delete_account_files(&tool_id, &self.store, &account_id)?;
         if let Some(name) = launcher {
             remove_launcher(&name);
@@ -2241,6 +2313,7 @@ impl ManagedState {
                 .retain(|account| !(account.tool_id == tool_id && account.id == account_id));
             self.store.save(&data)?;
         }
+        self.vault.delete(&tool_id, &account_id)?;
         self.snapshot()
     }
 
@@ -2689,7 +2762,9 @@ fn switch_runtime_plan(tool_id: &ToolId, is_api: bool) -> SwitchRuntimePlan {
     let refresh_codex = matches!(tool_id, ToolId::Codex) && !is_api;
     SwitchRuntimePlan {
         sync_codex_ide_credentials: refresh_codex,
-        restart_codex_runtime: refresh_codex,
+        // The automatic VS Code "Developer: Reload Window" below restarts its app-server
+        // gracefully. Killing it first races the Codex webview while its stdin is still in use.
+        restart_codex_runtime: false,
     }
 }
 
@@ -3129,11 +3204,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_subscription_switch_refreshes_ide_runtime() {
+    fn codex_subscription_switch_reloads_the_ide_without_killing_its_app_server() {
         let plan = switch_runtime_plan(&ToolId::Codex, false);
 
         assert!(plan.sync_codex_ide_credentials);
-        assert!(plan.restart_codex_runtime);
+        assert!(
+            !plan.restart_codex_runtime,
+            "Developer: Reload Window owns the graceful app-server restart"
+        );
     }
 
     #[test]
@@ -3168,9 +3246,11 @@ mod tests {
         let profile_dir = store.account_dir(&ToolId::Codex, "active");
         std::fs::create_dir_all(&profile_dir).unwrap();
         write_active_profile(&ToolId::Codex, &store, "active").unwrap();
+        let vault = VaultService::new(&store);
         let state = ManagedState {
             store,
             data: Mutex::new(data),
+            vault,
             api_server: Mutex::new(crate::api_gateway::ApiServerHandle::stopped(
                 &ApiGatewayConfig::default(),
             )),

@@ -7,12 +7,16 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 
 const APP_KEYCHAIN_SERVICE: &str = "AI Account Switcher";
+#[cfg(windows)]
+static NEXT_LOGIN_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn hide_command_window(command: &mut Command) {
     #[cfg(windows)]
@@ -29,13 +33,45 @@ struct DeviceLoginPrompt {
     device_code: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AppServerLoginSignal {
+    Initialized,
+    Completed(bool),
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginPromptEvent {
     tool_id: ToolId,
     account_id: String,
+    attempt_id: u64,
     login_url: Option<String>,
     device_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LoginPromptFinishedEvent {
+    tool_id: ToolId,
+    account_id: String,
+    attempt_id: u64,
+    success: bool,
+}
+
+impl LoginPromptFinishedEvent {
+    fn new(
+        tool_id: ToolId,
+        account_id: impl Into<String>,
+        attempt_id: u64,
+        success: bool,
+    ) -> Self {
+        Self {
+            tool_id,
+            account_id: account_id.into(),
+            attempt_id,
+            success,
+        }
+    }
 }
 
 /// The tool's default config dir (when the account isn't profile-mode, or is
@@ -84,6 +120,57 @@ fn parse_device_login_prompt(text: &str) -> DeviceLoginPrompt {
     prompt
 }
 
+/// The Codex app-server exposes device-login details as JSON-RPC instead of
+/// terminal text. Prefer it when available so the UI does not depend on ANSI
+/// rendering or a shell wrapper forwarding stdout correctly.
+fn parse_app_server_device_login_message(text: &str) -> DeviceLoginPrompt {
+    let Ok(message) = serde_json::from_str::<Value>(text) else {
+        return DeviceLoginPrompt::default();
+    };
+    let Some(result) = message.get("result") else {
+        return DeviceLoginPrompt::default();
+    };
+    if result.get("type").and_then(Value::as_str) != Some("chatgptDeviceCode") {
+        return DeviceLoginPrompt::default();
+    }
+    let login_url = result
+        .get("verificationUrl")
+        .and_then(Value::as_str)
+        .filter(|url| url.starts_with("https://auth.openai.com/"))
+        .map(str::to_string);
+    let device_code = result
+        .get("userCode")
+        .and_then(Value::as_str)
+        .filter(|code| is_device_code_token(code))
+        .map(str::to_string);
+    DeviceLoginPrompt {
+        login_url,
+        device_code,
+    }
+}
+
+fn parse_app_server_login_signal(text: &str) -> Option<AppServerLoginSignal> {
+    let message = serde_json::from_str::<Value>(text).ok()?;
+    if message.get("id").and_then(Value::as_u64) == Some(1) && message.get("result").is_some() {
+        return Some(AppServerLoginSignal::Initialized);
+    }
+    if message.get("method").and_then(Value::as_str) != Some("account/login/completed") {
+        return None;
+    }
+    message
+        .get("params")?
+        .get("success")?
+        .as_bool()
+        .map(AppServerLoginSignal::Completed)
+}
+
+/// Codex CLI 0.141 implements the v1 acknowledgement as an empty notification.
+/// Supplying a `params` object makes that version close the stdio connection
+/// before it accepts the device-code request.
+fn app_server_initialized_message() -> Value {
+    serde_json::json!({ "method": "initialized" })
+}
+
 /// Codex renders its device-login instructions as an interactive terminal UI on
 /// Windows. The device code can therefore be wrapped in ANSI styling rather
 /// than appearing as a plain whitespace-delimited token.
@@ -98,7 +185,7 @@ fn strip_terminal_control_sequences(text: &str) -> String {
 
         match chars.next() {
             Some('[') => {
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if ('@'..='~').contains(&next) {
                         break;
                     }
@@ -301,40 +388,112 @@ Get-CimInstance Win32_Process | Where-Object {
 /// after the switch is persisted, throttles itself with a local stamp file, then:
 /// - reloads the active VS Code window through the command palette
 /// - restarts the ChatGPT Codex desktop app only if it is already running
-pub fn refresh_codex_frontends_after_switch() {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let script = r#"
+#[cfg(windows)]
+fn codex_frontend_refresh_script() -> &'static str {
+    r#"
 $ErrorActionPreference = 'SilentlyContinue'
 $root = Join-Path $env:LOCALAPPDATA 'hoangphan\AI Account Switcher\data'
 $stamp = Join-Path $root 'codex-frontend-refresh.stamp'
+$result = Join-Path $root 'codex-frontend-refresh.result'
+$maxReloadAttempts = 3
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 if (Test-Path $stamp) {
   $age = (Get-Date) - (Get-Item $stamp).LastWriteTime
-  if ($age.TotalMinutes -lt 3) { exit 0 }
+  # Coalesce duplicate events from the same click, but never suppress a legitimate
+  # account change for several minutes.
+  if ($age.TotalSeconds -lt 10) {
+    Set-Content -LiteralPath $result -Value "skipped duplicate at $((Get-Date).ToString('o'))" -Encoding ASCII
+    exit 0
+  }
 }
 Set-Content -LiteralPath $stamp -Value (Get-Date).ToString('o') -Encoding ASCII
 Start-Sleep -Milliseconds 1200
 
+function Get-VsCodeChildIds([int]$parentId) {
+  @(Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -eq 'Code.exe' -and $_.ParentProcessId -eq $parentId
+  } | Select-Object -ExpandProperty ProcessId | Sort-Object)
+}
+
+function Wait-VsCodeReload([int]$parentId, [object[]]$beforeIds) {
+  $deadline = (Get-Date).AddSeconds(12)
+  do {
+    $currentIds = Get-VsCodeChildIds $parentId
+    if (@($currentIds | Where-Object { $beforeIds -notcontains $_ }).Count -gt 0) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
+function Paste-ExactVsCodeCommand {
+  $commandText = 'Developer: Reload Window'
+  $previousClipboard = $null
+  $clipboardReady = $false
+  for ($clipboardAttempt = 1; $clipboardAttempt -le 3 -and -not $clipboardReady; $clipboardAttempt++) {
+    try {
+      $previousClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
+      [System.Windows.Forms.Clipboard]::SetText('Developer: Reload Window')
+      $clipboardReady = $true
+    } catch {
+      Start-Sleep -Milliseconds 100
+    }
+  }
+  if (-not $clipboardReady) { return $false }
+
+  # Pasting bypasses Vietnamese IME key translation (for example, Window -> ưindow).
+  [System.Windows.Forms.SendKeys]::SendWait('^v')
+  Start-Sleep -Milliseconds 250
+
+  # Restore only while the clipboard still contains our temporary command. If the user copied
+  # something else during the short paste window, keep their newer clipboard value instead.
+  try {
+    $stillOurs = [System.Windows.Forms.Clipboard]::ContainsText() -and
+      [System.Windows.Forms.Clipboard]::GetText() -eq $commandText
+    if ($stillOurs) {
+      if ($null -eq $previousClipboard) {
+        [System.Windows.Forms.Clipboard]::Clear()
+      } else {
+        [System.Windows.Forms.Clipboard]::SetDataObject($previousClipboard, $true)
+      }
+    }
+  } catch {}
+  return $true
+}
+
 $code = Get-Process Code | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } | Sort-Object StartTime -Descending | Select-Object -First 1
+$reloadSucceeded = $false
 if ($code) {
   Add-Type -AssemblyName Microsoft.VisualBasic
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -Namespace Aisw -Name Fg -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
-  [Microsoft.VisualBasic.Interaction]::AppActivate($code.Id) | Out-Null
-  Start-Sleep -Milliseconds 350
-  # Only send keys if VS Code actually came to the foreground. The Windows foreground lock denies
-  # a background/tray process from stealing focus, and blindly sending '^+p' + text then typed the
-  # command into whatever app the user was actually using (Slack, a terminal, etc.).
-  if ([Aisw.Fg]::GetForegroundWindow() -eq $code.MainWindowHandle) {
-    [System.Windows.Forms.SendKeys]::SendWait('^+p')
-    Start-Sleep -Milliseconds 350
-    [System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')
-    Start-Sleep -Milliseconds 150
-    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  for ($attempt = 1; $attempt -le $maxReloadAttempts -and -not $reloadSucceeded; $attempt++) {
+    $beforeIds = Get-VsCodeChildIds $code.Id
+    [Microsoft.VisualBasic.Interaction]::AppActivate($code.Id) | Out-Null
+    Start-Sleep -Milliseconds 600
+    if ([Aisw.Fg]::GetForegroundWindow() -eq $code.MainWindowHandle) {
+      # F1 opens the command palette directly. Longer waits avoid pressing Enter before
+      # a busy extension host has produced the Reload Window search result.
+      [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+      [System.Windows.Forms.SendKeys]::SendWait('{F1}')
+      Start-Sleep -Milliseconds 1000
+      if (Paste-ExactVsCodeCommand) {
+        Start-Sleep -Milliseconds 1500
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        $reloadSucceeded = Wait-VsCodeReload $code.Id $beforeIds
+      }
+    }
+    if (-not $reloadSucceeded) { Start-Sleep -Milliseconds 750 }
   }
+}
+
+if ($reloadSucceeded) {
+  Set-Content -LiteralPath $result -Value "reloaded at $((Get-Date).ToString('o'))" -Encoding ASCII
+} elseif ($code) {
+  Set-Content -LiteralPath $result -Value "reload failed after $maxReloadAttempts attempts at $((Get-Date).ToString('o'))" -Encoding ASCII
+} else {
+  Set-Content -LiteralPath $result -Value "no VS Code window at $((Get-Date).ToString('o'))" -Encoding ASCII
 }
 
 $chat = Get-Process ChatGPT | Where-Object { $_.Path -like '*OpenAI.Codex_*' } | Select-Object -First 1
@@ -343,7 +502,15 @@ if ($chat) {
   Start-Sleep -Seconds 2
   Start-Process 'shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App'
 }
-"#;
+"#
+}
+
+pub fn refresh_codex_frontends_after_switch() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let script = codex_frontend_refresh_script();
         let _ = Command::new("powershell.exe")
             .args([
                 "-NoProfile",
@@ -591,6 +758,35 @@ mod codex_ide_credential_tests {
         assert!(!is_codex_runtime_process(
             "ChatGPT.exe",
             r#""C:\Program Files\WindowsApps\OpenAI.Codex_26.709.0.0_x64__2p2nqsd0c76g0\ChatGPT.exe""#
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vscode_refresh_waits_for_a_real_reload_and_retries_when_the_palette_misses() {
+        let script = codex_frontend_refresh_script();
+
+        assert!(script.contains("$maxReloadAttempts = 3"));
+        assert!(script.contains("Wait-VsCodeReload"));
+        assert!(script.contains("{F1}"));
+        assert!(script.contains("codex-frontend-refresh.result"));
+        assert!(script.contains("$age.TotalSeconds -lt 10"));
+        assert!(!script.contains("$age.TotalMinutes -lt 3"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vscode_refresh_pastes_the_exact_command_without_ime_key_translation() {
+        let script = codex_frontend_refresh_script();
+
+        assert!(script.contains("[System.Windows.Forms.Clipboard]::GetDataObject()"));
+        assert!(script.contains(
+            "[System.Windows.Forms.Clipboard]::SetText('Developer: Reload Window')"
+        ));
+        assert!(script.contains("[System.Windows.Forms.SendKeys]::SendWait('^v')"));
+        assert!(script.contains("[System.Windows.Forms.Clipboard]::SetDataObject("));
+        assert!(!script.contains(
+            "[System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')"
         ));
     }
 }
@@ -1609,10 +1805,12 @@ pub fn write_claude_proxy_settings(
 }
 
 /// Create/overwrite the launcher for an API/proxy account.
+///
 /// - Codex: export the key + force the gateway model with `-m` (Codex rewrites `model` in config
 ///   when the user touches its picker, so pinning on the command line keeps it working).
 /// - Claude: auth/base/model come from the profile's settings.json env, so the launcher only sets
 ///   the config dir.
+///
 /// `bypass` adds the tool's skip-approvals flag.
 pub fn write_api_launcher(
     tool_id: &ToolId,
@@ -1868,7 +2066,7 @@ fn decode_text_file(bytes: &[u8]) -> Option<(String, TextEncoding)> {
     ] {
         if bytes.starts_with(&bom) {
             let body = &bytes[2..];
-            if body.len() % 2 != 0 {
+            if !body.len().is_multiple_of(2) {
                 return None;
             }
             let units: Vec<u16> = body
@@ -2145,6 +2343,45 @@ Follow these steps to sign in with ChatGPT using device code authorization:
         );
         assert_eq!(prompt.device_code.as_deref(), Some("4VVW-NA1NF"));
     }
+
+    #[test]
+    fn parses_structured_device_code_from_codex_app_server() {
+        let message = r#"{"id":2,"result":{"type":"chatgptDeviceCode","loginId":"login-1","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-12345"}}"#;
+        let prompt = parse_app_server_device_login_message(message);
+        assert_eq!(
+            prompt.login_url.as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        assert_eq!(prompt.device_code.as_deref(), Some("ABCD-12345"));
+    }
+
+    #[test]
+    fn detects_structured_device_login_completion() {
+        let message = r#"{"method":"account/login/completed","params":{"loginId":"login-1","success":true,"error":null}}"#;
+        assert_eq!(
+            parse_app_server_login_signal(message),
+            Some(AppServerLoginSignal::Completed(true))
+        );
+    }
+
+    #[test]
+    fn app_server_initialized_notification_uses_the_v1_empty_shape() {
+        assert_eq!(
+            app_server_initialized_message(),
+            serde_json::json!({ "method": "initialized" })
+        );
+    }
+
+    #[test]
+    fn login_finished_event_is_account_scoped() {
+        let event = LoginPromptFinishedEvent::new(ToolId::Codex, "acc-2", 2, false);
+        assert_eq!(event.tool_id, ToolId::Codex);
+        assert_eq!(event.account_id, "acc-2");
+        assert_eq!(event.attempt_id, 2);
+        assert!(!event.success);
+        let payload = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(payload["attemptId"], 2);
+    }
 }
 
 fn run_profile_login_command(
@@ -2211,10 +2448,156 @@ fn run_hidden_profile_login_command(
     tool_id: ToolId,
     account_id: String,
 ) -> Result<()> {
+    if matches!(tool_id, ToolId::Codex) && login_args == ["login", "--device-auth"] {
+        return run_hidden_codex_device_code_login_command(
+            app, command, env_name, profile, tool_id, account_id,
+        );
+    }
+    run_hidden_profile_login_command_legacy(
+        app, command, env_name, profile, login_args, tool_id, account_id,
+    )
+}
+
+/// Uses Codex's structured app-server login protocol for device-code sign-in.
+/// The normal CLI writes the same code to a terminal, but npm's cmd/node
+/// wrapper can make that output unreliable when the app launches it hidden.
+#[cfg(windows)]
+fn run_hidden_codex_device_code_login_command(
+    app: AppHandle,
+    command: &Path,
+    env_name: &str,
+    profile: &Path,
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+    const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+    let attempt_id = NEXT_LOGIN_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+
+    let mut child = match Command::new(command)
+        .args(["app-server", "--stdio"])
+        .env(env_name, profile)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = app.emit(
+                "login-prompt-finished",
+                LoginPromptFinishedEvent::new(tool_id, account_id, attempt_id, false),
+            );
+            return Err(error).context("Couldn't start the Codex device-login service");
+        }
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .context("Codex device-login service didn't expose stdin")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Codex device-login service didn't expose stdout")?;
+
+    std::thread::spawn(move || {
+        let (signal_tx, signal_rx) = mpsc::channel();
+        let reader_app = app.clone();
+        let reader_tool = tool_id.clone();
+        let reader_account = account_id.clone();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let prompt = parse_app_server_device_login_message(&line);
+                if prompt.login_url.is_some() && prompt.device_code.is_some() {
+                    let _ = reader_app.emit(
+                        "login-prompt",
+                        LoginPromptEvent {
+                            tool_id: reader_tool.clone(),
+                            account_id: reader_account.clone(),
+                            attempt_id,
+                            login_url: prompt.login_url,
+                            device_code: prompt.device_code,
+                        },
+                    );
+                }
+                if let Some(signal) = parse_app_server_login_signal(&line) {
+                    let _ = signal_tx.send(signal);
+                }
+            }
+        });
+
+        let mut stdin = stdin;
+        let mut write_message = |message: Value| -> Result<()> {
+            let encoded = serde_json::to_string(&message)?;
+            stdin.write_all(encoded.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            stdin.flush()?;
+            Ok(())
+        };
+        let initialized = write_message(serde_json::json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "AI Account Switcher",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": {},
+            },
+        }))
+        .and_then(|_| match signal_rx.recv_timeout(INITIALIZE_TIMEOUT) {
+            Ok(AppServerLoginSignal::Initialized) => Ok(()),
+            Ok(_) => anyhow::bail!("Codex device-login service completed before initialization"),
+            Err(_) => anyhow::bail!("Codex device-login service did not initialize"),
+        });
+        let success = if initialized.is_ok()
+            && write_message(app_server_initialized_message()).is_ok()
+            && write_message(serde_json::json!({
+                "id": 2,
+                "method": "account/login/start",
+                "params": { "type": "chatgptDeviceCode" },
+            }))
+            .is_ok()
+        {
+            matches!(
+                signal_rx.recv_timeout(LOGIN_TIMEOUT),
+                Ok(AppServerLoginSignal::Completed(true))
+            )
+        } else {
+            false
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        let _ = app.emit(
+            "login-prompt-finished",
+            LoginPromptFinishedEvent::new(tool_id, account_id, attempt_id, success),
+        );
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_hidden_profile_login_command_legacy(
+    app: AppHandle,
+    command: &Path,
+    env_name: &str,
+    profile: &Path,
+    login_args: &[&str],
+    tool_id: ToolId,
+    account_id: String,
+) -> Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let attempt_id = NEXT_LOGIN_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
 
-    let mut child = Command::new(command)
+    let mut child = match Command::new(command)
         .args(login_args)
         .env(env_name, profile)
         .stdin(Stdio::null())
@@ -2222,17 +2605,53 @@ fn run_hidden_profile_login_command(
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .context("Couldn't start the hidden Codex login process")?;
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = app.emit(
+                "login-prompt-finished",
+                LoginPromptFinishedEvent::new(
+                    tool_id,
+                    account_id,
+                    attempt_id,
+                    false,
+                ),
+            );
+            return Err(error).context("Couldn't start the hidden Codex login process");
+        }
+    };
 
+    let mut output_readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        spawn_login_output_reader(stdout, app.clone(), tool_id.clone(), account_id.clone());
+        output_readers.push(spawn_login_output_reader(
+            stdout,
+            app.clone(),
+            tool_id.clone(),
+            account_id.clone(),
+            attempt_id,
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        spawn_login_output_reader(stderr, app.clone(), tool_id.clone(), account_id.clone());
+        output_readers.push(spawn_login_output_reader(
+            stderr,
+            app.clone(),
+            tool_id.clone(),
+            account_id.clone(),
+            attempt_id,
+        ));
     }
 
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let success = child.wait().is_ok_and(|status| status.success());
+        // Drain both pipes before emitting completion so a late prompt cannot resurrect the
+        // banner after the frontend has cleared it.
+        for reader in output_readers {
+            let _ = reader.join();
+        }
+        let _ = app.emit(
+            "login-prompt-finished",
+            LoginPromptFinishedEvent::new(tool_id, account_id, attempt_id, success),
+        );
     });
     Ok(())
 }
@@ -2243,7 +2662,8 @@ fn spawn_login_output_reader<R: Read + Send + 'static>(
     app: AppHandle,
     tool_id: ToolId,
     account_id: String,
-) {
+    attempt_id: u64,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut seen = DeviceLoginPrompt::default();
         let mut reader = BufReader::new(reader);
@@ -2279,13 +2699,14 @@ fn spawn_login_output_reader<R: Read + Send + 'static>(
                     LoginPromptEvent {
                         tool_id: tool_id.clone(),
                         account_id: account_id.clone(),
+                        attempt_id,
                         login_url: seen.login_url.clone(),
                         device_code: seen.device_code.clone(),
                     },
                 );
             }
         }
-    });
+    })
 }
 
 fn open_terminal_script(script: &str) -> Result<()> {
