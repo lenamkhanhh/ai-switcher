@@ -854,3 +854,9 @@ Sau thay đổi hoặc rollback: mở thread mới/restart Codex và ghi sự ki
 - Scope: reviewed the existing React/Tauri account, login, store, snapshot, and delete flows before adding a separate encrypted vault. OAuth/device-code behavior and profile credential isolation remain unchanged; credentials are entered explicitly by the user and are never scraped from a browser or login process.
 - Baseline before changes: `cargo test` passed 123/123, `npm.cmd run test:audit` passed 10/10, `npm.cmd run test:logic` passed 3/3, `npm.cmd run build` passed, and `git diff --check` passed.
 - Security design: vault records will be encrypted at rest with a user-entered vault passkey, kept out of `state.json`, logs, and account snapshots; reads require an unlocked in-memory session and account deletion will remove the matching vault record.
+
+### 2026-08-03 - Encrypted credential vault installed
+
+- Verification before install: `cargo test --quiet` passed 126/126, `cargo check --all-targets`, `npm.cmd run test:audit` 11/11, `npm.cmd run test:logic` 3/3, `npm.cmd run build`, `git diff --check`, and `npm.cmd run tauri build -- --debug` all passed.
+- Deployment: the NSIS installer `AI Account Switcher_0.5.5_x64-setup.exe` completed with exit code 0. The installed executable at `C:\Users\HP\AppData\Local\AI Account Switcher\ai-account-switcher.exe` is version 0.5.5, has the new 32 MB build size, and launched successfully with `Responding = True` from the installed path.
+- No account, login, browser, OAuth, API gateway, or credential action was automated during installation verification. The source remains committed at `c1edb17`.
