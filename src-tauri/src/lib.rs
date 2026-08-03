@@ -10,6 +10,7 @@ mod store;
 mod tools;
 mod tray;
 mod usage;
+mod vault;
 
 use app_state::ManagedState;
 use models::{
