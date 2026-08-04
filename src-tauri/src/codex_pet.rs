@@ -234,11 +234,14 @@ mod windows_impl {
         let before = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
         let after = clear_transparent_exstyle(before);
         let current = (rect.left, rect.top, width, height);
-        let target = monitor_work_area(hwnd)
+        let work_area = monitor_work_area(hwnd);
+        let target = work_area
             .map(|work| super::safe_pet_position(current, work))
             .unwrap_or((rect.left, rect.top));
         let style_changed = before != after;
-        let position_changed = target != (rect.left, rect.top);
+        let position_changed = work_area
+            .map(|work| super::should_reposition_pet(current, work))
+            .unwrap_or(false);
         if !style_changed && !position_changed {
             return TRUE;
         }
