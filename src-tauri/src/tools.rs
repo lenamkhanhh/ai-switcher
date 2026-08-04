@@ -1,3 +1,4 @@
+use crate::codex_pet;
 use crate::models::{CodexLoginMethod, StartupIntegrationMode, ToolId};
 use crate::store::Store;
 use anyhow::{Context, Result};
@@ -525,6 +526,10 @@ pub fn refresh_codex_frontends_after_switch() {
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
+        // The desktop app is restarted asynchronously above. Retry the pet repair for a bounded
+        // window so account switching keeps its existing refresh semantics without touching the
+        // Codex main window or any credential/profile file.
+        codex_pet::schedule_repair_after_codex_restart();
     }
 }
 

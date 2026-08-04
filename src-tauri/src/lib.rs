@@ -470,6 +470,9 @@ pub fn run() {
         .setup(|app| {
             // Menu-bar (tray) icon for quick account switching without opening the window.
             tray::create(app.handle())?;
+            // Codex's optional desktop pet is a separate transparent window. Repair only its
+            // click-through flag; this does not touch account state, auth files, or reload flow.
+            codex_pet::repair_codex_pet_input();
             // On Windows the WebView process can start while the main window remains hidden.
             // Explicitly restore it so the first Desktop-shortcut click always opens the UI.
             #[cfg(target_os = "windows")]
@@ -514,6 +517,9 @@ pub fn run() {
             let codex_watch_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
+                // Reapply the narrow runtime repair if Codex recreated the pet after an update,
+                // wake, or account-switch restart. The scan is a no-op for all other windows.
+                codex_pet::repair_codex_pet_input();
                 let state = codex_watch_handle.state::<ManagedState>();
                 let _ = state.check_codex_quota_error_and_auto_switch(Some(&codex_watch_handle));
             });

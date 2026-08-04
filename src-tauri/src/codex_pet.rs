@@ -1,8 +1,236 @@
 //! Windows-only, narrowly scoped repair for the Codex desktop pet hit-test.
 //!
-//! The tests below describe the contract before the native implementation is added:
-//! only the small Codex pet window may be touched, and the repair must preserve all
-//! other extended-window-style flags.
+//! Codex renders the pet in a separate transparent top-level window. On the affected
+//! Windows build that window also carries `WS_EX_TRANSPARENT`, so Windows sends pointer
+//! hit-tests to the Codex main window underneath it. We remove only that one style bit
+//! from the small pet window; account/profile/auth state is not involved.
+
+const WS_EX_TRANSPARENT: u64 = 0x20;
+const PET_MIN_DIMENSION: i32 = 120;
+const PET_MAX_DIMENSION: i32 = 700;
+
+pub(crate) fn is_codex_pet_window(
+    process_path: &str,
+    title: &str,
+    class_name: &str,
+    width: i32,
+    height: i32,
+    visible: bool,
+    enabled: bool,
+) -> bool {
+    let process = process_path.to_ascii_lowercase();
+    process.contains("openai.codex_")
+        && process.ends_with("\\chatgpt.exe")
+        && title.eq_ignore_ascii_case("codex")
+        && class_name == "Chrome_WidgetWin_1"
+        && (PET_MIN_DIMENSION..=PET_MAX_DIMENSION).contains(&width)
+        && (PET_MIN_DIMENSION..=PET_MAX_DIMENSION).contains(&height)
+        && visible
+        && enabled
+}
+
+pub(crate) fn clear_transparent_exstyle(exstyle: u64) -> u64 {
+    exstyle & !WS_EX_TRANSPARENT
+}
+
+#[cfg(windows)]
+mod windows_impl {
+    use super::{clear_transparent_exstyle, is_codex_pet_window};
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::thread;
+    use std::time::Duration;
+
+    type Hwnd = isize;
+    type Handle = *mut c_void;
+    type Bool = i32;
+    type Dword = u32;
+    type LongPtr = isize;
+
+    const TRUE: Bool = 1;
+    const FALSE: Bool = 0;
+    const GWL_EXSTYLE: i32 = -20;
+    const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    type EnumWindowsProc = unsafe extern "system" fn(Hwnd, isize) -> Bool;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(callback: EnumWindowsProc, lparam: isize) -> Bool;
+        fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
+        fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max_count: i32) -> i32;
+        fn GetClassNameW(hwnd: Hwnd, class_name: *mut u16, max_count: i32) -> i32;
+        fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut Dword) -> Dword;
+        fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> Bool;
+        fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> LongPtr;
+        fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: LongPtr) -> LongPtr;
+        fn IsWindowVisible(hwnd: Hwnd) -> Bool;
+        fn IsWindowEnabled(hwnd: Hwnd) -> Bool;
+        fn SetWindowPos(
+            hwnd: Hwnd,
+            insert_after: Hwnd,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> Bool;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: Dword, inherit_handle: Bool, process_id: Dword) -> Handle;
+        fn QueryFullProcessImageNameW(
+            process: Handle,
+            flags: Dword,
+            filename: *mut u16,
+            size: *mut Dword,
+        ) -> Bool;
+        fn CloseHandle(handle: Handle) -> Bool;
+    }
+
+    struct RepairContext {
+        repaired: usize,
+    }
+
+    fn read_window_text(hwnd: Hwnd) -> String {
+        // Electron/Tauri titles are short, but cap the allocation so a malformed window
+        // cannot cause an unbounded read during the periodic repair scan.
+        let length = unsafe { GetWindowTextLengthW(hwnd) }.clamp(0, 512) as usize;
+        let mut buffer = vec![0u16; length.saturating_add(1)];
+        let count = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+        String::from_utf16_lossy(&buffer[..(count.max(0) as usize).min(buffer.len())])
+    }
+
+    fn read_class_name(hwnd: Hwnd) -> String {
+        let mut buffer = vec![0u16; 256];
+        let count = unsafe { GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+        String::from_utf16_lossy(&buffer[..(count.max(0) as usize).min(buffer.len())])
+    }
+
+    fn process_path(process_id: Dword) -> Option<String> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id) };
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut buffer = vec![0u16; 1024];
+        let mut length = buffer.len() as Dword;
+        let succeeded = unsafe {
+            QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) == TRUE
+        };
+        unsafe {
+            CloseHandle(handle);
+        }
+        succeeded.then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+    }
+
+    unsafe extern "system" fn enum_windows_proc(hwnd: Hwnd, lparam: isize) -> Bool {
+        let context = &mut *(lparam as *mut RepairContext);
+        if IsWindowVisible(hwnd) == FALSE || IsWindowEnabled(hwnd) == FALSE {
+            return TRUE;
+        }
+
+        let title = read_window_text(hwnd);
+        let class_name = read_class_name(hwnd);
+        if !title.eq_ignore_ascii_case("codex") || class_name != "Chrome_WidgetWin_1" {
+            return TRUE;
+        }
+
+        let mut rect = MaybeUninit::<Rect>::uninit();
+        if GetWindowRect(hwnd, rect.as_mut_ptr()) == FALSE {
+            return TRUE;
+        }
+        let rect = rect.assume_init();
+        let width = rect.right.saturating_sub(rect.left);
+        let height = rect.bottom.saturating_sub(rect.top);
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+        let Some(path) = process_path(process_id) else {
+            return TRUE;
+        };
+        if !is_codex_pet_window(
+            &path,
+            &title,
+            &class_name,
+            width,
+            height,
+            true,
+            true,
+        ) {
+            return TRUE;
+        }
+
+        let before = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
+        let after = clear_transparent_exstyle(before);
+        if before == after {
+            return TRUE;
+        }
+
+        // Keep position, z-order, activation, topmost, and every other style bit intact.
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, after as LongPtr);
+        SetWindowPos(
+            hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
+        if current == after {
+            context.repaired = context.repaired.saturating_add(1);
+        }
+        TRUE
+    }
+
+    pub(crate) fn repair_codex_pet_input() -> usize {
+        let mut context = RepairContext { repaired: 0 };
+        unsafe {
+            EnumWindows(enum_windows_proc, &mut context as *mut _ as isize);
+        }
+        context.repaired
+    }
+
+    pub(crate) fn schedule_repair_after_codex_restart() {
+        thread::spawn(|| {
+            // The frontend refresh intentionally restarts Codex asynchronously. Retry for a
+            // short bounded window so the new pet is repaired without a permanent process hook.
+            for _ in 0..20 {
+                if repair_codex_pet_input() > 0 {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
+pub(crate) use windows_impl::{repair_codex_pet_input, schedule_repair_after_codex_restart};
+
+#[cfg(not(windows))]
+pub(crate) fn repair_codex_pet_input() -> usize {
+    0
+}
+
+#[cfg(not(windows))]
+pub(crate) fn schedule_repair_after_codex_restart() {}
 
 #[cfg(test)]
 mod tests {
