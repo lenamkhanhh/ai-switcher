@@ -312,7 +312,8 @@ pub(crate) fn schedule_repair_after_codex_restart() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_transparent_exstyle, is_codex_pet_window, safe_pet_position, should_reposition_pet,
+        clear_transparent_exstyle, is_codex_pet_window, pet_layout_height, safe_pet_position,
+        should_reposition_pet,
     };
 
     #[test]
@@ -400,5 +401,11 @@ mod tests {
         let work_area = (0, 0, 1550, 830);
         assert!(!should_reposition_pet(current, work_area));
         assert_eq!(safe_pet_position(current, work_area), (420, 180));
+    }
+
+    #[test]
+    fn expands_the_overlay_to_fit_the_sprite_and_controls() {
+        assert_eq!(pet_layout_height(400), 520);
+        assert_eq!(pet_layout_height(540), 540);
     }
 }
