@@ -12,7 +12,7 @@ const PET_SAFE_EDGE_MARGIN: i32 = 20;
 // The pet's activity bubble is laid out above/below the sprite depending on its screen position.
 // Keeping this much room below the overlay prevents Codex from putting the sprite and controls
 // past the bottom of its fixed-size transparent window.
-const PET_SAFE_BOTTOM_MARGIN: i32 = 180;
+const PET_SAFE_BOTTOM_MARGIN: i32 = 220;
 
 pub(crate) fn is_codex_pet_window(
     process_path: &str,
@@ -391,7 +391,7 @@ mod tests {
         let current = (-12, 384, 408, 400);
         let work_area = (0, 0, 1550, 830);
         assert!(should_reposition_pet(current, work_area));
-        assert_eq!(safe_pet_position(current, work_area), (20, 250));
+        assert_eq!(safe_pet_position(current, work_area), (20, 210));
     }
 
     #[test]
