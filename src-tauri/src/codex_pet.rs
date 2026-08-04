@@ -234,7 +234,10 @@ pub(crate) fn schedule_repair_after_codex_restart() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_transparent_exstyle, is_codex_pet_window};
+    use super::{
+        clear_transparent_exstyle, is_codex_pet_window, safe_pet_position,
+        should_reposition_pet,
+    };
 
     #[test]
     fn accepts_only_the_small_codex_pet_window() {
@@ -305,5 +308,21 @@ mod tests {
     #[test]
     fn leaves_already_interactive_windows_unchanged() {
         assert_eq!(clear_transparent_exstyle(0x0280_088), 0x0280_088);
+    }
+
+    #[test]
+    fn moves_an_edge_clipped_pet_into_the_safe_work_area() {
+        let current = (-12, 384, 408, 400);
+        let work_area = (0, 0, 1550, 830);
+        assert!(should_reposition_pet(current, work_area));
+        assert_eq!(safe_pet_position(current, work_area), (20, 250));
+    }
+
+    #[test]
+    fn preserves_a_pet_that_is_already_clear_of_the_edges() {
+        let current = (420, 180, 408, 400);
+        let work_area = (0, 0, 1550, 830);
+        assert!(!should_reposition_pet(current, work_area));
+        assert_eq!(safe_pet_position(current, work_area), (420, 180));
     }
 }
