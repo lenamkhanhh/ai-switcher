@@ -8,6 +8,11 @@
 const WS_EX_TRANSPARENT: u64 = 0x20;
 const PET_MIN_DIMENSION: i32 = 120;
 const PET_MAX_DIMENSION: i32 = 700;
+const PET_SAFE_EDGE_MARGIN: i32 = 20;
+// The pet's activity bubble is laid out above/below the sprite depending on its screen position.
+// Keeping this much room below the overlay prevents Codex from putting the sprite and controls
+// past the bottom of its fixed-size transparent window.
+const PET_SAFE_BOTTOM_MARGIN: i32 = 180;
 
 pub(crate) fn is_codex_pet_window(
     process_path: &str,
@@ -33,6 +38,27 @@ pub(crate) fn clear_transparent_exstyle(exstyle: u64) -> u64 {
     exstyle & !WS_EX_TRANSPARENT
 }
 
+pub(crate) fn safe_pet_position(
+    current: (i32, i32, i32, i32),
+    work_area: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (left, top, width, height) = current;
+    let (work_left, work_top, work_right, work_bottom) = work_area;
+    let min_x = work_left + PET_SAFE_EDGE_MARGIN;
+    let max_x = (work_right - width - PET_SAFE_EDGE_MARGIN).max(min_x);
+    let min_y = work_top + PET_SAFE_EDGE_MARGIN;
+    let max_y = (work_bottom - height - PET_SAFE_BOTTOM_MARGIN).max(min_y);
+    (left.clamp(min_x, max_x), top.clamp(min_y, max_y))
+}
+
+pub(crate) fn should_reposition_pet(
+    current: (i32, i32, i32, i32),
+    work_area: (i32, i32, i32, i32),
+) -> bool {
+    let target = safe_pet_position(current, work_area);
+    target != (current.0, current.1)
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::{clear_transparent_exstyle, is_codex_pet_window};
@@ -51,11 +77,10 @@ mod windows_impl {
     const FALSE: Bool = 0;
     const GWL_EXSTYLE: i32 = -20;
     const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
+    const MONITOR_DEFAULTTONEAREST: u32 = 0x00000002;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -64,6 +89,14 @@ mod windows_impl {
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    struct MonitorInfo {
+        cb_size: Dword,
+        monitor: Rect,
+        work: Rect,
+        flags: Dword,
     }
 
     type EnumWindowsProc = unsafe extern "system" fn(Hwnd, isize) -> Bool;
@@ -76,6 +109,8 @@ mod windows_impl {
         fn GetClassNameW(hwnd: Hwnd, class_name: *mut u16, max_count: i32) -> i32;
         fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut Dword) -> Dword;
         fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> Bool;
+        fn MonitorFromWindow(hwnd: Hwnd, flags: Dword) -> Hwnd;
+        fn GetMonitorInfoW(monitor: Hwnd, info: *mut MonitorInfo) -> Bool;
         fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> LongPtr;
         fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: LongPtr) -> LongPtr;
         fn IsWindowVisible(hwnd: Hwnd) -> Bool;
@@ -139,6 +174,35 @@ mod windows_impl {
         succeeded.then(|| String::from_utf16_lossy(&buffer[..length as usize]))
     }
 
+    fn monitor_work_area(hwnd: Hwnd) -> Option<(i32, i32, i32, i32)> {
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        if monitor == 0 {
+            return None;
+        }
+        let mut info = MonitorInfo {
+            cb_size: std::mem::size_of::<MonitorInfo>() as Dword,
+            monitor: Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            work: Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            flags: 0,
+        };
+        (unsafe { GetMonitorInfoW(monitor, &mut info) } == TRUE).then_some((
+            info.work.left,
+            info.work.top,
+            info.work.right,
+            info.work.bottom,
+        ))
+    }
+
     unsafe extern "system" fn enum_windows_proc(hwnd: Hwnd, lparam: isize) -> Bool {
         let context = &mut *(lparam as *mut RepairContext);
         if IsWindowVisible(hwnd) == FALSE || IsWindowEnabled(hwnd) == FALSE {
@@ -163,37 +227,47 @@ mod windows_impl {
         let Some(path) = process_path(process_id) else {
             return TRUE;
         };
-        if !is_codex_pet_window(
-            &path,
-            &title,
-            &class_name,
-            width,
-            height,
-            true,
-            true,
-        ) {
+        if !is_codex_pet_window(&path, &title, &class_name, width, height, true, true) {
             return TRUE;
         }
 
         let before = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
         let after = clear_transparent_exstyle(before);
-        if before == after {
+        let current = (rect.left, rect.top, width, height);
+        let target = monitor_work_area(hwnd)
+            .map(|work| super::safe_pet_position(current, work))
+            .unwrap_or((rect.left, rect.top));
+        let style_changed = before != after;
+        let position_changed = target != (rect.left, rect.top);
+        if !style_changed && !position_changed {
             return TRUE;
         }
 
         // Keep position, z-order, activation, topmost, and every other style bit intact.
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, after as LongPtr);
+        if style_changed {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, after as LongPtr);
+        }
         SetWindowPos(
             hwnd,
             0,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            target.0,
+            target.1,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
         let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
-        if current == after {
+        let mut position_ok = true;
+        if position_changed {
+            let mut moved = MaybeUninit::<Rect>::uninit();
+            if GetWindowRect(hwnd, moved.as_mut_ptr()) == FALSE {
+                position_ok = false;
+            } else {
+                let moved = moved.assume_init();
+                position_ok = moved.left == target.0 && moved.top == target.1;
+            }
+        }
+        if current == after && position_ok {
             context.repaired = context.repaired.saturating_add(1);
         }
         TRUE
@@ -235,8 +309,7 @@ pub(crate) fn schedule_repair_after_codex_restart() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_transparent_exstyle, is_codex_pet_window, safe_pet_position,
-        should_reposition_pet,
+        clear_transparent_exstyle, is_codex_pet_window, safe_pet_position, should_reposition_pet,
     };
 
     #[test]
