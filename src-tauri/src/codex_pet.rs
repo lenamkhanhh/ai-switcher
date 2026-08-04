@@ -9,6 +9,8 @@ const WS_EX_TRANSPARENT: u64 = 0x20;
 const PET_MIN_DIMENSION: i32 = 120;
 const PET_MAX_DIMENSION: i32 = 700;
 const PET_SAFE_EDGE_MARGIN: i32 = 20;
+const PET_LAYOUT_HEIGHT: i32 = 520;
+const PET_ACTIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 // The pet's activity bubble is laid out above/below the sprite depending on its screen position.
 // Keeping this much room below the overlay prevents Codex from putting the sprite and controls
 // past the bottom of its fixed-size transparent window.
@@ -38,6 +40,10 @@ pub(crate) fn clear_transparent_exstyle(exstyle: u64) -> u64 {
     exstyle & !WS_EX_TRANSPARENT
 }
 
+pub(crate) fn pet_layout_height(window_height: i32) -> i32 {
+    window_height.max(PET_LAYOUT_HEIGHT)
+}
+
 pub(crate) fn safe_pet_position(
     current: (i32, i32, i32, i32),
     work_area: (i32, i32, i32, i32),
@@ -48,7 +54,15 @@ pub(crate) fn safe_pet_position(
     let max_x = (work_right - width - PET_SAFE_EDGE_MARGIN).max(min_x);
     let min_y = work_top + PET_SAFE_EDGE_MARGIN;
     let max_y = (work_bottom - height - PET_SAFE_BOTTOM_MARGIN).max(min_y);
-    (left.clamp(min_x, max_x), top.clamp(min_y, max_y))
+    // Codex reflows its bubble/sprite stack at the lower edge and can immediately pull the
+    // overlay back down. A top rail is deterministic and leaves the natural controls visible.
+    let safe_top = min_y;
+    let safe_y = if top > max_y {
+        safe_top
+    } else {
+        top.clamp(min_y, max_y)
+    };
+    (left.clamp(min_x, max_x), safe_y)
 }
 
 pub(crate) fn should_reposition_pet(
@@ -61,11 +75,14 @@ pub(crate) fn should_reposition_pet(
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{clear_transparent_exstyle, is_codex_pet_window};
+    use super::{
+        clear_transparent_exstyle, is_codex_pet_window, PET_ACTIVE_POLL_INTERVAL,
+        PET_MAX_DIMENSION, PET_MIN_DIMENSION,
+    };
     use std::ffi::c_void;
     use std::mem::MaybeUninit;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     type Hwnd = isize;
     type Handle = *mut c_void;
@@ -139,7 +156,7 @@ mod windows_impl {
     }
 
     struct RepairContext {
-        repaired: usize,
+        targets: Vec<(Hwnd, Dword)>,
     }
 
     fn read_window_text(hwnd: Hwnd) -> String {
@@ -221,19 +238,30 @@ mod windows_impl {
         }
         let rect = rect.assume_init();
         let width = rect.right.saturating_sub(rect.left);
-        let height = rect.bottom.saturating_sub(rect.top);
+        let window_height = rect.bottom.saturating_sub(rect.top);
         let mut process_id = 0;
         GetWindowThreadProcessId(hwnd, &mut process_id);
         let Some(path) = process_path(process_id) else {
             return TRUE;
         };
-        if !is_codex_pet_window(&path, &title, &class_name, width, height, true, true) {
+        if !is_codex_pet_window(
+            &path,
+            &title,
+            &class_name,
+            width,
+            window_height,
+            true,
+            true,
+        ) {
             return TRUE;
         }
+        context.targets.push((hwnd, process_id));
 
         let before = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
         let after = clear_transparent_exstyle(before);
-        let current = (rect.left, rect.top, width, height);
+        // Let Codex own its natural overlay height. Only repair its position; fighting the
+        // renderer's resize loop makes the controls flicker and can leave them non-interactive.
+        let current = (rect.left, rect.top, width, window_height);
         let work_area = monitor_work_area(hwnd);
         let target = work_area
             .map(|work| super::safe_pet_position(current, work))
@@ -256,32 +284,103 @@ mod windows_impl {
             target.0,
             target.1,
             width,
-            height,
+            window_height,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64;
-        let mut position_ok = true;
-        if position_changed {
-            let mut moved = MaybeUninit::<Rect>::uninit();
-            if GetWindowRect(hwnd, moved.as_mut_ptr()) == FALSE {
-                position_ok = false;
-            } else {
-                let moved = moved.assume_init();
-                position_ok = moved.left == target.0 && moved.top == target.1;
-            }
-        }
-        if current == after && position_ok {
-            context.repaired = context.repaired.saturating_add(1);
-        }
         TRUE
     }
 
-    pub(crate) fn repair_codex_pet_input() -> usize {
-        let mut context = RepairContext { repaired: 0 };
+    fn current_pet_rect(hwnd: Hwnd, process_id: Dword) -> Option<Rect> {
+        let mut current_process_id = 0;
+        if unsafe { GetWindowThreadProcessId(hwnd, &mut current_process_id) } == 0
+            || current_process_id != process_id
+            || unsafe { IsWindowVisible(hwnd) } == FALSE
+            || unsafe { IsWindowEnabled(hwnd) } == FALSE
+        {
+            return None;
+        }
+
+        let mut rect = MaybeUninit::<Rect>::uninit();
+        if unsafe { GetWindowRect(hwnd, rect.as_mut_ptr()) } == FALSE {
+            return None;
+        }
+        let rect = unsafe { rect.assume_init() };
+        let width = rect.right.saturating_sub(rect.left);
+        let height = rect.bottom.saturating_sub(rect.top);
+        (PET_MIN_DIMENSION..=PET_MAX_DIMENSION)
+            .contains(&width)
+            .then_some(rect)
+            .filter(|_| (PET_MIN_DIMENSION..=PET_MAX_DIMENSION).contains(&height))
+    }
+
+    fn maintain_pet_window(hwnd: Hwnd, process_id: Dword) -> bool {
+        let Some(rect) = current_pet_rect(hwnd, process_id) else {
+            return false;
+        };
+        let width = rect.right.saturating_sub(rect.left);
+        let window_height = rect.bottom.saturating_sub(rect.top);
+        let desired_height = super::pet_layout_height(window_height);
+        let current = (rect.left, rect.top, width, desired_height);
+        let work_area = monitor_work_area(hwnd);
+        let target = work_area
+            .map(|work| super::safe_pet_position(current, work))
+            .unwrap_or((rect.left, rect.top));
+        let before = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize as u64 };
+        let after = clear_transparent_exstyle(before);
+        let style_changed = before != after;
+        let position_changed = work_area
+            .map(|work| super::should_reposition_pet(current, work))
+            .unwrap_or(false);
+        let size_changed = desired_height != window_height;
+        if !style_changed && !position_changed && !size_changed {
+            return true;
+        }
+
+        unsafe {
+            // Keep z-order, activation, topmost, and every other style bit intact.
+            if style_changed {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, after as LongPtr);
+            }
+            SetWindowPos(
+                hwnd,
+                0,
+                target.0,
+                target.1,
+                width,
+                desired_height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+        true
+    }
+
+    pub(crate) fn repair_codex_pet_input() -> Vec<(Hwnd, Dword)> {
+        let mut context = RepairContext {
+            targets: Vec::new(),
+        };
         unsafe {
             EnumWindows(enum_windows_proc, &mut context as *mut _ as isize);
         }
-        context.repaired
+        context.targets
+    }
+
+    pub(crate) fn start_pet_input_monitor() {
+        thread::spawn(|| {
+            let mut targets = Vec::new();
+            let mut last_scan = Instant::now() - Duration::from_secs(1);
+            loop {
+                if targets.is_empty() || last_scan.elapsed() >= Duration::from_millis(500) {
+                    targets = repair_codex_pet_input();
+                    last_scan = Instant::now();
+                }
+                targets.retain(|(hwnd, process_id)| maintain_pet_window(*hwnd, *process_id));
+                thread::sleep(if targets.is_empty() {
+                    Duration::from_millis(500)
+                } else {
+                    PET_ACTIVE_POLL_INTERVAL
+                });
+            }
+        });
     }
 
     pub(crate) fn schedule_repair_after_codex_restart() {
@@ -289,7 +388,7 @@ mod windows_impl {
             // The frontend refresh intentionally restarts Codex asynchronously. Retry for a
             // short bounded window so the new pet is repaired without a permanent process hook.
             for _ in 0..20 {
-                if repair_codex_pet_input() > 0 {
+                if !repair_codex_pet_input().is_empty() {
                     return;
                 }
                 thread::sleep(Duration::from_millis(500));
@@ -299,15 +398,20 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub(crate) use windows_impl::{repair_codex_pet_input, schedule_repair_after_codex_restart};
+pub(crate) use windows_impl::{
+    repair_codex_pet_input, schedule_repair_after_codex_restart, start_pet_input_monitor,
+};
 
 #[cfg(not(windows))]
-pub(crate) fn repair_codex_pet_input() -> usize {
-    0
+pub(crate) fn repair_codex_pet_input() -> Vec<(isize, u32)> {
+    Vec::new()
 }
 
 #[cfg(not(windows))]
 pub(crate) fn schedule_repair_after_codex_restart() {}
+
+#[cfg(not(windows))]
+pub(crate) fn start_pet_input_monitor() {}
 
 #[cfg(test)]
 mod tests {
@@ -388,11 +492,24 @@ mod tests {
     }
 
     #[test]
+    fn expands_only_the_native_overlay_client_height() {
+        assert_eq!(pet_layout_height(400), 520);
+        assert_eq!(pet_layout_height(540), 540);
+    }
+
+    #[test]
     fn moves_an_edge_clipped_pet_into_the_safe_work_area() {
         let current = (-12, 384, 408, 400);
         let work_area = (0, 0, 1550, 830);
         assert!(should_reposition_pet(current, work_area));
-        assert_eq!(safe_pet_position(current, work_area), (20, 210));
+        assert_eq!(safe_pet_position(current, work_area), (20, 20));
+    }
+
+    #[test]
+    fn keeps_the_natural_overlay_high_enough_for_bottom_controls() {
+        let current = (-12, 384, 408, 416);
+        let work_area = (0, 0, 1536, 816);
+        assert_eq!(safe_pet_position(current, work_area), (20, 20));
     }
 
     #[test]
@@ -403,9 +520,4 @@ mod tests {
         assert_eq!(safe_pet_position(current, work_area), (420, 180));
     }
 
-    #[test]
-    fn expands_the_overlay_to_fit_the_sprite_and_controls() {
-        assert_eq!(pet_layout_height(400), 520);
-        assert_eq!(pet_layout_height(540), 540);
-    }
 }
