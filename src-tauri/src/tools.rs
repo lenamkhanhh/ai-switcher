@@ -935,6 +935,19 @@ fn codex_reauth_marker(profile: &Path) -> PathBuf {
     profile.join(".reauth-pending")
 }
 
+const CODEX_IMPORTED_SESSION_MARKER: &str = ".k12-imported";
+
+/// Mark a profile created from a local K12 session export. This is metadata only; it contains
+/// no credential material and lets re-login preserve the browser subscription flow after restart.
+pub(crate) fn mark_codex_imported_session(profile: &Path) -> Result<()> {
+    fs::write(profile.join(CODEX_IMPORTED_SESSION_MARKER), b"v1")?;
+    Ok(())
+}
+
+pub(crate) fn is_codex_imported_session(profile: &Path) -> bool {
+    profile.join(CODEX_IMPORTED_SESSION_MARKER).is_file()
+}
+
 pub fn mark_codex_reauth_pending(profile: &Path) -> Result<()> {
     let auth = fs::read(profile.join("auth.json")).unwrap_or_default();
     let digest = Sha256::digest(&auth);

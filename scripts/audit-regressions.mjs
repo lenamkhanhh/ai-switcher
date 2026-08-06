@@ -182,6 +182,8 @@ test("K12 Codex import stays local and reduces the export to OAuth fields", asyn
   assert.match(importerProduction, /"refresh_token"/);
   assert.doesNotMatch(importerProduction, /model_mapping/);
   assert.match(appState, /write_codex_auth\(&profile, &auth_json\)/);
+  assert.match(appState, /codex_login_method: CodexLoginMethod::BrowserProfile/);
+  assert.match(appState, /migrate_codex_imported_login_methods/);
   assert.match(appState, /Imported session/);
   assert.match(app, /Import K12/);
   assert.match(app, /Nothing is uploaded/);

@@ -18,7 +18,8 @@ use crate::tools::{
     delete_account_files, full_launcher_name, install_shell_hook, is_installed,
     launch_profile_login, launcher_name_collides_with_system, launcher_paths,
     link_shared_config_to, link_shared_sessions_to, refresh_codex_frontends_after_switch,
-    remove_launcher, restart_codex_runtime_after_switch, sync_codex_ide_credentials,
+    is_codex_imported_session, mark_codex_imported_session, remove_launcher,
+    restart_codex_runtime_after_switch, sync_codex_ide_credentials,
     sync_reauthenticated_codex_credentials, write_active_profile, write_api_key_file,
     write_api_launcher, write_claude_proxy_settings, write_codex_auth, write_codex_proxy_config,
     write_launcher,
@@ -62,6 +63,7 @@ impl ManagedState {
         let store = Store::new()?;
         let mut data = store.load()?;
         migrate_defaults(&mut data.accounts);
+        migrate_codex_imported_login_methods(&store, &mut data.accounts);
         migrate_codex_reauth_states(&mut data.accounts);
         migrate_auto_switch_settings(&mut data);
         retire_auto_ping_settings(&mut data);
@@ -1854,6 +1856,11 @@ impl ManagedState {
             return Err(error).context("Couldn't create the account's custom command");
         }
         crate::tools::seed_onboarding(&tool_id, &profile);
+        if let Err(error) = mark_codex_imported_session(&profile) {
+            remove_launcher(&full_launcher);
+            let _ = delete_account_files(&tool_id, &self.store, &id);
+            return Err(error).context("Couldn't mark the imported Codex profile");
+        }
 
         let timestamp = now();
         let account = Account {
@@ -1875,7 +1882,9 @@ impl ManagedState {
             api_provider: None,
             launcher_paths: None,
             quota_status: None,
-            codex_login_method: CodexLoginMethod::DeviceCode,
+            // Imported K12 sessions belong to a subscription account. Re-login must use the
+            // standard browser OAuth flow rather than the device-code-only path.
+            codex_login_method: CodexLoginMethod::BrowserProfile,
         };
 
         let save_result = {
@@ -2610,6 +2619,28 @@ fn migrate_codex_reauth_states(accounts: &mut [Account]) {
                 .is_some_and(|quota| quota_requires_reauth(&ToolId::Codex, quota))
     }) {
         account.state = AccountState::NeedsLogin;
+    }
+}
+
+/// K12 imports use standard browser subscription OAuth when they need to refresh. The marker
+/// covers newly imported profiles; the launcher/name fallback upgrades accounts created by the
+/// first importer release, which predates the marker and used the documented `k12` defaults.
+fn migrate_codex_imported_login_methods(store: &Store, accounts: &mut [Account]) {
+    for account in accounts.iter_mut().filter(|account| {
+        account.tool_id == ToolId::Codex
+            && !account.is_default
+            && account.api_provider.is_none()
+            && account.codex_login_method == CodexLoginMethod::DeviceCode
+    }) {
+        let profile = store.account_dir(&ToolId::Codex, &account.id);
+        let legacy_defaults = account.name.trim().eq_ignore_ascii_case("k12")
+            && account
+                .launcher_command
+                .as_deref()
+                .is_some_and(|launcher| launcher.trim().eq_ignore_ascii_case("codex-k12"));
+        if is_codex_imported_session(&profile) || legacy_defaults {
+            account.codex_login_method = CodexLoginMethod::BrowserProfile;
+        }
     }
 }
 
@@ -3559,6 +3590,28 @@ mod tests {
         migrate_codex_reauth_states(&mut accounts);
 
         assert_eq!(accounts[0].state, AccountState::Idle);
+    }
+
+    #[test]
+    fn startup_migration_promotes_k12_import_to_browser_subscription_login() {
+        let root = std::env::temp_dir().join(format!("aisw-k12-migration-{}", uuid::Uuid::new_v4()));
+        let store = Store::for_test(root.clone()).unwrap();
+        let profile = store.account_dir(&ToolId::Codex, "k12");
+        std::fs::create_dir_all(&profile).unwrap();
+        crate::tools::mark_codex_imported_session(&profile).unwrap();
+
+        let mut account = test_account("k12", AccountState::NeedsLogin, 100.0);
+        account.launcher_command = Some("codex-k12".to_string());
+        let mut accounts = vec![account];
+
+        migrate_codex_imported_login_methods(&store, &mut accounts);
+
+        assert_eq!(
+            accounts[0].codex_login_method,
+            CodexLoginMethod::BrowserProfile
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
