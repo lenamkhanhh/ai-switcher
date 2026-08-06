@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum size accepted for a K12 export. The supported export is a small JSON wrapper; keeping
 /// this bounded prevents an accidental multi-gigabyte paste from becoming an IPC/memory issue.
@@ -41,6 +41,16 @@ struct K12Credentials {
     email: Option<String>,
     #[serde(default)]
     expires_at: Option<i64>,
+}
+
+impl Drop for K12Credentials {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+        self.id_token.zeroize();
+        self.chatgpt_account_id.zeroize();
+        self.email.zeroize();
+    }
 }
 
 pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
