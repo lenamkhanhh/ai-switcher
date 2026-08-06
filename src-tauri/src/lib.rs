@@ -1,6 +1,7 @@
 mod api_gateway;
 mod app_state;
 mod codex_pet;
+mod codex_import;
 mod detection;
 mod handoff;
 mod models;
