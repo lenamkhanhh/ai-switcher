@@ -18,7 +18,8 @@ use app_state::ManagedState;
 use models::{
     AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, CreateApiGatewayKeyInput,
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
-    DeleteApiGatewayKeyInput, DetectionReport, RenameAccountInput, SaveApiGatewayComboInput,
+    DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput, RenameAccountInput,
+    SaveApiGatewayComboInput,
     SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput, StartApiGatewayInput,
     SwitchAccountInput, ToolId, UsageReports, VaultCredential, VaultCredentialInput,
     VaultCredentialSummary, VaultStatus,
@@ -85,6 +86,19 @@ fn add_account(
     input: AddAccountInput,
 ) -> Result<AppSnapshot, String> {
     let snapshot = state.add_account(&app, input).map_err(display_error)?;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn import_codex_account(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    input: ImportCodexAccountInput,
+) -> Result<AppSnapshot, String> {
+    let snapshot = state
+        .import_codex_account(input)
+        .map_err(display_error)?;
     tray::rebuild(&app);
     Ok(snapshot)
 }
@@ -433,6 +447,7 @@ pub fn run() {
             refresh_account,
             reauthenticate_account,
             add_account,
+            import_codex_account,
             add_api_account,
             fetch_gateway_models,
             rename_account,

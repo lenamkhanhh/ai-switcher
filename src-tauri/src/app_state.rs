@@ -1,9 +1,10 @@
+use crate::codex_import::{codex_auth_json, parse_k12_export};
 use crate::models::{
     Account, AccountState, AddAccountInput, AddApiAccountInput, ApiGatewayAccount, ApiGatewayCombo,
     ApiGatewayConfig, ApiGatewayKey, ApiGatewayServerState, ApiGatewaySnapshot, ApiProvider,
     ApiUsageReport, AppSnapshot, AutoSwitchSetting, CodexLoginMethod, CreateApiGatewayKeyInput,
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
-    DeleteApiGatewayKeyInput, DetectionReport, QuotaInfo, RenameAccountInput,
+    DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput, QuotaInfo, RenameAccountInput,
     SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
     StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport, UsageReports,
     VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
@@ -19,7 +20,8 @@ use crate::tools::{
     link_shared_config_to, link_shared_sessions_to, refresh_codex_frontends_after_switch,
     remove_launcher, restart_codex_runtime_after_switch, sync_codex_ide_credentials,
     sync_reauthenticated_codex_credentials, write_active_profile, write_api_key_file,
-    write_api_launcher, write_claude_proxy_settings, write_codex_proxy_config, write_launcher,
+    write_api_launcher, write_claude_proxy_settings, write_codex_auth, write_codex_proxy_config,
+    write_launcher,
 };
 use crate::vault::VaultService;
 use anyhow::{Context, Result};
@@ -1773,6 +1775,130 @@ impl ManagedState {
         }
         // Claude/Codex: create the profile + custom command, then open Terminal to log in.
         self.create_profile_account(app, input)
+    }
+
+    /// Import one K12 OpenAI OAuth export into an isolated Codex profile. The raw JSON is parsed
+    /// in memory, reduced to Codex's four token fields, and never enters `state.json` or logs.
+    pub fn import_codex_account(&self, mut input: ImportCodexAccountInput) -> Result<AppSnapshot> {
+        let tool_id = ToolId::Codex;
+        let mut raw_session = zeroize::Zeroizing::new(std::mem::take(&mut input.session_json));
+        validate_name(&tool_id, None, &input.name, self)?;
+        let raw_launcher = input.launcher.trim();
+        if raw_launcher.is_empty() {
+            anyhow::bail!("A custom command is required for the account (e.g. codex-k12)");
+        }
+        let id = Uuid::new_v4().to_string();
+        let full_launcher = self.validated_launcher(&tool_id, &id, raw_launcher)?;
+        let name = normalized_or_default_name(&tool_id, &input.name, self)?;
+        let session_result = parse_k12_export(&raw_session);
+        // The IPC payload is no longer needed once parsing finishes. Do not retain it across the
+        // profile/state work below, including on validation errors.
+        raw_session.zeroize();
+        let session = session_result?;
+        let auth_json = codex_auth_json(&session)?;
+
+        let (default_dir, binary_path) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let default_dir = configured_default_config_dir(&data, &tool_id)
+                .unwrap_or_else(|| default_config_dir(&tool_id));
+            let binary_path = configured_binary_path(&data, &tool_id)
+                .context("CLI setup is ambiguous — choose the Codex binary first")?;
+            (default_dir, binary_path)
+        };
+
+        // Avoid silently creating two profiles for the same provider account, including the
+        // machine-default profile. Read only the account id from each existing auth file.
+        {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let duplicate = data.accounts.iter().any(|account| {
+                if account.tool_id != tool_id || account.api_provider.is_some() {
+                    return false;
+                }
+                let config_dir = if account.is_default {
+                    default_dir.clone()
+                } else {
+                    self.store.account_dir(&tool_id, &account.id)
+                };
+                crate::tools::codex_auth_account_id(&config_dir.join("auth.json"))
+                    .as_deref()
+                    == Some(session.account_id.as_str())
+            });
+            if duplicate {
+                anyhow::bail!("This Codex account is already saved");
+            }
+        }
+
+        let profile = create_profile_with_default(&tool_id, &self.store, &id, &default_dir)?;
+        link_shared_config_to(&tool_id, &profile, &default_dir);
+
+        if let Err(error) = write_codex_auth(&profile, &auth_json) {
+            remove_launcher(&full_launcher);
+            let _ = delete_account_files(&tool_id, &self.store, &id);
+            return Err(error).context("Couldn't install imported Codex credentials");
+        }
+        if let Err(error) = write_launcher(
+            &tool_id,
+            &self.store,
+            &id,
+            &full_launcher,
+            &binary_path,
+        ) {
+            remove_launcher(&full_launcher);
+            let _ = delete_account_files(&tool_id, &self.store, &id);
+            return Err(error).context("Couldn't create the account's custom command");
+        }
+        crate::tools::seed_onboarding(&tool_id, &profile);
+
+        let timestamp = now();
+        let account = Account {
+            id: id.clone(),
+            tool_id: tool_id.clone(),
+            name,
+            state: AccountState::Idle,
+            fingerprint: format!("profile:{id}"),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            last_used_at: None,
+            quota: Some(QuotaInfo::with_message(
+                "Imported session — click Refresh to read quota",
+            )),
+            launcher_command: Some(full_launcher.clone()),
+            is_default: false,
+            avatar_url: None,
+            account_email: session.email.clone().or_else(|| codex_account_email(&profile)),
+            api_provider: None,
+            launcher_paths: None,
+            quota_status: None,
+            codex_login_method: CodexLoginMethod::DeviceCode,
+        };
+
+        let save_result = {
+            let mut data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            data.accounts.push(account);
+            match self.store.save(&data) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    data.accounts.retain(|entry| entry.id != id);
+                    Err(error)
+                }
+            }
+        };
+        if let Err(error) = save_result {
+            remove_launcher(&full_launcher);
+            let _ = delete_account_files(&tool_id, &self.store, &id);
+            return Err(error).context("Couldn't save the imported account");
+        }
+
+        self.snapshot()
     }
 
     /// Save the Antigravity IDE account currently logged in: capture the token from the default

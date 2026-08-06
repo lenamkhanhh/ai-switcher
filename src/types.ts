@@ -286,6 +286,12 @@ export interface AddAccountInput {
   codexLoginMethod?: CodexLoginMethod;
 }
 
+export interface ImportCodexAccountInput {
+  name: string;
+  launcher: string;
+  sessionJson: string;
+}
+
 export interface VaultStatus {
   configured: boolean;
   unlocked: boolean;

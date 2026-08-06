@@ -169,6 +169,25 @@ test("Codex login prompts finish account-scoped after output is drained", async 
   );
 });
 
+test("K12 Codex import stays local and reduces the export to OAuth fields", async () => {
+  const importer = await read("src-tauri/src/codex_import.rs");
+  const importerProduction = importer.slice(0, importer.indexOf("#[cfg(test)]"));
+  const appState = await read("src-tauri/src/app_state.rs");
+  const app = await read("src/App.tsx");
+  const tauri = await read("src/tauri.ts");
+
+  assert.match(importerProduction, /MAX_IMPORT_BYTES/);
+  assert.match(importerProduction, /accounts\.len\(\) != 1/);
+  assert.match(importerProduction, /platform\.eq_ignore_ascii_case\("openai"\)/);
+  assert.match(importerProduction, /"refresh_token"/);
+  assert.doesNotMatch(importerProduction, /model_mapping/);
+  assert.match(appState, /write_codex_auth\(&profile, &auth_json\)/);
+  assert.match(appState, /Imported session/);
+  assert.match(app, /Import K12/);
+  assert.match(app, /Nothing is uploaded/);
+  assert.match(tauri, /import_codex_account/);
+});
+
 test("Settings formats CLI paths for display without mutating stored setup paths", async () => {
   const app = await read("src/App.tsx");
   const formatter = await read("src/pathDisplay.ts");

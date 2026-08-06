@@ -93,7 +93,7 @@ pub fn default_config_dir(tool_id: &ToolId) -> PathBuf {
     }
 }
 
-fn codex_auth_account_id(path: &Path) -> Option<String> {
+pub(crate) fn codex_auth_account_id(path: &Path) -> Option<String> {
     let value: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
     value
         .get("tokens")?
@@ -238,6 +238,36 @@ fn copy_codex_auth(source: &Path, destination: &Path) -> Result<()> {
             destination.display()
         )
     })
+}
+
+/// Install a validated Codex `auth.json` into a new account profile without overwriting an
+/// existing credential file. The caller owns the secret buffer and should keep it zeroizing.
+pub(crate) fn write_codex_auth(profile: &Path, bytes: &[u8]) -> Result<()> {
+    let destination = profile.join("auth.json");
+    // `symlink_metadata` also catches a broken symlink. Never replace an existing credential
+    // path during import, even if the file itself is currently unreadable.
+    if destination.symlink_metadata().is_ok() {
+        anyhow::bail!("The target Codex profile already contains credentials");
+    }
+
+    fs::create_dir_all(profile)?;
+    let temporary = profile.join(format!(
+        ".auth.json.import-{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| "Couldn't stage imported Codex credentials");
+    }
+    if let Err(error) = set_owner_only_permissions(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).context("Couldn't protect imported Codex credentials");
+    }
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| "Couldn't install imported Codex credentials");
+    }
+    Ok(())
 }
 
 fn save_machine_default_codex_auth(store: &Store, default_auth: &Path) -> Result<()> {
@@ -600,6 +630,21 @@ mod codex_ide_credential_tests {
             r#"{{"auth_mode":"chatgpt","tokens":{{"account_id":"{account_id}","access_token":"{marker}"}}}}"#
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn imported_codex_auth_is_atomic_and_never_overwritten() {
+        let root = temp_root("codex-import-auth");
+        let profile = root.join("profile");
+        fs::create_dir_all(&profile).unwrap();
+        let first = auth("imported", "first");
+        write_codex_auth(&profile, &first).unwrap();
+        assert_eq!(fs::read(profile.join("auth.json")).unwrap(), first);
+
+        let second = auth("imported", "second");
+        assert!(write_codex_auth(&profile, &second).is_err());
+        assert_eq!(fs::read(profile.join("auth.json")).unwrap(), auth("imported", "first"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

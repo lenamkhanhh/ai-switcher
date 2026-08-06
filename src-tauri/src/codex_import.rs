@@ -18,12 +18,12 @@ pub(crate) struct ImportedCodexSession {
     pub(crate) id_token: Zeroizing<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct K12Export {
     accounts: Vec<K12Account>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct K12Account {
     platform: String,
     #[serde(rename = "type")]
@@ -31,7 +31,7 @@ struct K12Account {
     credentials: K12Credentials,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct K12Credentials {
     access_token: String,
     refresh_token: String,
@@ -49,8 +49,9 @@ pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
     }
 
     let raw = raw.trim_start_matches('\u{feff}');
-    let export: K12Export = serde_json::from_str(raw)
-        .map_err(|error| anyhow::anyhow!("Session file does not match the K12 export format: {error}"))?;
+    let export: K12Export = serde_json::from_str(raw).map_err(|error| {
+        anyhow::anyhow!("Session file does not match the K12 export format: {error}")
+    })?;
     if export.accounts.len() != 1 {
         bail!("K12 export must contain exactly one account");
     }
@@ -83,7 +84,10 @@ pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
-    if email.as_ref().is_some_and(|value| value.len() > 320 || !value.contains('@')) {
+    if email
+        .as_ref()
+        .is_some_and(|value| value.len() > 320 || !value.contains('@'))
+    {
         bail!("The session email is invalid");
     }
 
@@ -96,7 +100,7 @@ pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
     })
 }
 
-pub(crate) fn codex_auth_json(session: &ImportedCodexSession) -> Zeroizing<Vec<u8>> {
+pub(crate) fn codex_auth_json(session: &ImportedCodexSession) -> Result<Zeroizing<Vec<u8>>> {
     let mut tokens = Map::new();
     tokens.insert(
         "id_token".to_string(),
@@ -116,12 +120,15 @@ pub(crate) fn codex_auth_json(session: &ImportedCodexSession) -> Zeroizing<Vec<u
     );
 
     let mut auth = Map::new();
-    auth.insert("auth_mode".to_string(), Value::String("chatgpt".to_string()));
+    auth.insert(
+        "auth_mode".to_string(),
+        Value::String("chatgpt".to_string()),
+    );
     auth.insert("tokens".to_string(), Value::Object(tokens));
 
-    // Serialization cannot fail for a JSON object made only of strings. Keep the fallback small
-    // and non-sensitive if a future serde implementation changes that invariant.
-    Zeroizing::new(serde_json::to_vec_pretty(&Value::Object(auth)).unwrap_or_default())
+    serde_json::to_vec_pretty(&Value::Object(auth))
+        .map(Zeroizing::new)
+        .map_err(|_| anyhow::anyhow!("Couldn't encode Codex credentials"))
 }
 
 fn required_secret(value: &str, field: &str) -> Result<Zeroizing<String>> {
@@ -173,9 +180,13 @@ mod tests {
     #[test]
     fn maps_only_codex_auth_fields() {
         let session = parse_k12_export(&sample_export()).expect("valid K12 export");
-        let auth: Value = serde_json::from_slice(&codex_auth_json(&session)).expect("auth JSON");
+        let auth: Value = serde_json::from_slice(&codex_auth_json(&session).expect("auth JSON"))
+            .expect("auth JSON");
 
-        assert_eq!(auth.get("auth_mode").and_then(Value::as_str), Some("chatgpt"));
+        assert_eq!(
+            auth.get("auth_mode").and_then(Value::as_str),
+            Some("chatgpt")
+        );
         assert_eq!(
             auth.get("tokens")
                 .and_then(|tokens| tokens.get("account_id"))

@@ -6,6 +6,7 @@ import type {
   ApiUsageReport,
   AppSnapshot,
   DetectionReport,
+  ImportCodexAccountInput,
   RenameAccountInput,
   CreateApiGatewayKeyInput,
   CreateApiGatewayKeyResult,
@@ -508,6 +509,27 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
   if (command === "add_api_account") {
     return structuredClone(demoSnapshot) as T;
   }
+  if (command === "import_codex_account") {
+    const input = args?.input as ImportCodexAccountInput | undefined;
+    const tool = demoSnapshot.tools.find((item) => item.id === "codex");
+    if (tool && input && !tool.accounts.some((account) => account.name === input.name)) {
+      tool.accounts.push({
+        id: crypto.randomUUID(),
+        toolId: "codex",
+        name: input.name || "codex-imported",
+        state: "idle",
+        fingerprint: "profile:demo-import",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastUsedAt: null,
+        quota: quota(null, null, "Imported session — click Refresh to read quota"),
+        launcherCommand: input.launcher,
+        isDefault: false,
+        codexLoginMethod: "deviceCode",
+      });
+    }
+    return structuredClone(demoSnapshot) as T;
+  }
   if (command === "accept_disclaimer") {
     demoSnapshot.disclaimerAccepted = true;
     return structuredClone(demoSnapshot) as T;
@@ -523,6 +545,8 @@ export const api = {
   reauthenticateAccount: (toolId: ToolId, accountId: string) =>
     invoke<AppSnapshot>("reauthenticate_account", { toolId, accountId }),
   addAccount: (input: AddAccountInput) => invoke<AppSnapshot>("add_account", { input }),
+  importCodexAccount: (input: ImportCodexAccountInput) =>
+    invoke<AppSnapshot>("import_codex_account", { input }),
   addApiAccount: (input: AddApiAccountInput) => invoke<AppSnapshot>("add_api_account", { input }),
   fetchGatewayModels: (baseUrl: string, apiKey: string) =>
     invoke<string[]>("fetch_gateway_models", { baseUrl, apiKey }),

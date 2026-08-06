@@ -2655,6 +2655,10 @@ button.danger:hover:not(:disabled) {
   padding: 3px;
 }
 
+.kindToggle.threeWay {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .kindToggle button {
   background: transparent;
   border-color: transparent;
@@ -2688,6 +2692,34 @@ button.danger:hover:not(:disabled) {
   color: var(--text-3);
   font-size: 11.5px;
   line-height: 1.45;
+}
+
+.importSessionPanel {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+}
+
+.importSessionPanel small {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.importSessionPanel input[type="file"] {
+  min-height: 36px;
+  padding: 7px 9px;
+}
+
+.importSessionFile {
+  color: var(--text-2);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Keep a tall Add-API form usable */

@@ -151,6 +151,7 @@ import type {
   ConfigCandidate,
   CreateApiGatewayKeyInput,
   DetectionReport,
+  ImportCodexAccountInput,
   SaveApiGatewayComboInput,
   SetApiGatewayAccountInput,
   SetToolSetupInput,
@@ -1247,6 +1248,11 @@ export function App() {
           onClose={() => setDialog(null)}
           onSubmit={async (input) => {
             if (await run("add", () => api.addAccount(input))) {
+              setDialog(null);
+            }
+          }}
+          onSubmitImport={async (input) => {
+            if (await run("add", () => api.importCodexAccount(input))) {
               setDialog(null);
             }
           }}
@@ -2980,27 +2986,32 @@ function AddDialog({
   tool,
   onClose,
   onSubmit,
+  onSubmitImport,
   onSubmitApi,
 }: {
   tool: ToolStatus;
   onClose: () => void;
   onSubmit: (input: AddAccountInput) => Promise<void>;
+  onSubmitImport: (input: ImportCodexAccountInput) => Promise<void>;
   onSubmitApi: (input: AddApiAccountInput) => Promise<void>;
 }) {
   const isCli = tool.id !== "antigravity";
   // API/proxy accounts are supported for the CLI tools (Codex + Claude Code).
   const canApi = tool.id === "codex" || tool.id === "claude";
+  const canImport = tool.id === "codex";
   const bypassFlag =
     tool.id === "claude"
       ? "--dangerously-skip-permissions"
       : "--dangerously-bypass-approvals-and-sandbox";
-  const [kind, setKind] = useState<"login" | "api">("login");
+  const [kind, setKind] = useState<"login" | "import" | "api">("login");
+  const isImport = canImport && kind === "import";
   const isApi = canApi && kind === "api";
   const [codexLoginMethod, setCodexLoginMethod] =
     useState<CodexLoginMethod>("deviceCode");
 
   const [name, setName] = useState("");
   const [launcher, setLauncher] = useState("");
+  const [sessionFile, setSessionFile] = useState<File | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   // API-mode state.
@@ -3052,6 +3063,29 @@ function AddDialog({
       setMessage(`A custom command is required (e.g. ${tool.id}-work)`);
       return;
     }
+    if (isImport) {
+      if (!sessionFile) {
+        setMessage("Choose the K12 session export file first");
+        return;
+      }
+      if (sessionFile.size > 5 * 1024 * 1024) {
+        setMessage("Session file is too large (maximum is 5 MB)");
+        return;
+      }
+      let sessionJson: string;
+      try {
+        sessionJson = await sessionFile.text();
+      } catch {
+        setMessage("Couldn't read the selected session file");
+        return;
+      }
+      await onSubmitImport({
+        name: name.trim(),
+        launcher: launcher.trim(),
+        sessionJson,
+      });
+      return;
+    }
     await onSubmit({
       toolId: tool.id,
       name: name.trim(),
@@ -3093,7 +3127,7 @@ function AddDialog({
         <h2>{isCli ? `Add ${tool.name} account` : "Save the signed-in Antigravity IDE account"}</h2>
 
         {canApi && (
-          <div className="kindToggle">
+          <div className={`kindToggle${canImport ? " threeWay" : ""}`}>
             <button
               type="button"
               className={kind === "login" ? "active" : ""}
@@ -3101,6 +3135,15 @@ function AddDialog({
             >
               Subscription (login)
             </button>
+            {canImport && (
+              <button
+                type="button"
+                className={kind === "import" ? "active" : ""}
+                onClick={() => setKind("import")}
+              >
+                Import K12
+              </button>
+            )}
             <button
               type="button"
               className={kind === "api" ? "active" : ""}
@@ -3124,7 +3167,7 @@ function AddDialog({
 
         {isCli && !isApi && (
           <>
-            {tool.id === "codex" && (
+            {tool.id === "codex" && !isImport && (
               <fieldset className="codexLoginMethod">
                 <legend>Sign-in method</legend>
                 <div className="kindToggle">
@@ -3149,6 +3192,36 @@ function AddDialog({
                     : "Opens a separate Chrome profile, then starts standard browser sign-in. Use this for EDU/workspace accounts that block device codes."}
                 </small>
               </fieldset>
+            )}
+            {isImport && (
+              <div className="importSessionPanel">
+                <label>
+                  K12 session export
+                  <input
+                    type="file"
+                    accept=".json,.txt,application/json,text/plain"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      if (file && file.size > 5 * 1024 * 1024) {
+                        setSessionFile(null);
+                        setMessage("Session file is too large (maximum is 5 MB)");
+                        return;
+                      }
+                      setMessage(null);
+                      setSessionFile(file);
+                    }}
+                  />
+                </label>
+                <small>
+                  The file is read locally and reduced to Codex credentials. Nothing is uploaded
+                  to a converter or sent to a third party.
+                </small>
+                {sessionFile && (
+                  <span className="importSessionFile" title={sessionFile.name}>
+                    Selected: {sessionFile.name}
+                  </span>
+                )}
+              </div>
             )}
             <label>
               <span className="labelRow">
@@ -3266,7 +3339,13 @@ function AddDialog({
         <div className="modalActions">
           <button onClick={onClose}>Cancel</button>
           <button className="primary" onClick={runSubmit} disabled={submitting}>
-            {isApi ? "Create account" : isCli ? "Create & login" : "Save this account"}
+            {isApi
+              ? "Create account"
+              : isImport
+                ? "Import session"
+                : isCli
+                  ? "Create & login"
+                  : "Save this account"}
           </button>
         </div>
       </section>

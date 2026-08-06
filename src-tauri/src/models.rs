@@ -769,6 +769,16 @@ pub struct AddAccountInput {
     pub codex_login_method: CodexLoginMethod,
 }
 
+/// Local-only Codex OAuth export import. The JSON is sent over the Tauri IPC boundary and is
+/// consumed immediately; it is never persisted in the app snapshot/state document.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCodexAccountInput {
+    pub name: String,
+    pub launcher: String,
+    pub session_json: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AddMode {
