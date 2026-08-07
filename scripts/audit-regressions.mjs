@@ -144,6 +144,29 @@ test("Accounts uses a responsive Tokyo workbench shell without changing the card
   assert.match(css, /\.shell\.accountsTheme\s+\.quotaReset\s*\{[^}]*font-size:\s*11px/s);
 });
 
+test("Accounts status uses the active source of truth and surfaces quota attention", async () => {
+  const source = await read("src/App.tsx");
+  const cardStart = source.indexOf("function AccountCard");
+  const cardEnd = source.indexOf("\nfunction AutoSwitchBar", cardStart);
+  assert.ok(cardStart >= 0 && cardEnd > cardStart, "AccountCard must remain independently reviewable");
+  const card = source.slice(cardStart, cardEnd);
+
+  assert.match(card, /const isActive = account\.id === tool\.activeAccountId;/);
+  assert.doesNotMatch(card, /account\.id === tool\.activeAccountId\s*\|\|\s*account\.state === "active"/);
+  assert.match(source, /currentTool\.installed \? \(attentionAccountCount > 0 \? "warn" : "ok"\) : "muted"/);
+  assert.match(source, /attentionAccountCount > 0 \? "Needs attention" : "Ready"/);
+});
+
+test("Windows persisted-state permissions are explicit instead of a no-op", async () => {
+  const source = await read("src-tauri/src/store.rs");
+  assert.match(source, /icacls/);
+  assert.match(source, /windows_current_principal/);
+  assert.doesNotMatch(
+    source,
+    /#\[cfg\(not\(unix\)\)\]\s*fn set_owner_only_permissions\(_path: &std::path::Path\) -> Result<\(\)>\s*\{\s*Ok\(\(\)\)/s,
+  );
+});
+
 test("Codex login prompts finish account-scoped after output is drained", async () => {
   const app = await read("src/App.tsx");
   const lifecycle = await read("src/loginPromptLifecycle.ts");

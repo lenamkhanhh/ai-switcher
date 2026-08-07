@@ -2308,6 +2308,35 @@ mod tests {
         assert!(full_launcher_name(&ToolId::Antigravity, "x").is_err());
     }
 
+    #[test]
+    fn staged_account_files_can_be_restored_or_finalized() {
+        let root = std::env::temp_dir().join(format!(
+            "aisw-delete-stage-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Store::for_test(root.clone()).unwrap();
+        let profile = store.account_dir(&ToolId::Codex, "acc1");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("auth.json"), b"fixture").unwrap();
+
+        let staged = stage_account_files(&ToolId::Codex, &store, "acc1")
+            .unwrap()
+            .expect("profile directory should be staged");
+        assert!(!profile.exists());
+        assert!(staged.exists());
+
+        restore_staged_account_files(&ToolId::Codex, &store, "acc1", &staged).unwrap();
+        assert_eq!(fs::read(profile.join("auth.json")).unwrap(), b"fixture");
+
+        let staged = stage_account_files(&ToolId::Codex, &store, "acc1")
+            .unwrap()
+            .expect("profile directory should be staged a second time");
+        finalize_staged_account_files(&ToolId::Codex, &store, "acc1", &staged).unwrap();
+        assert!(!profile.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_launcher_paths_create_cmd_and_ps1() {

@@ -291,6 +291,7 @@ pub fn normalize_account_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{ApiGatewayAccount, ApiPoolAccountState, ToolId};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_store(name: &str) -> Store {
@@ -335,6 +336,63 @@ mod tests {
 
         assert_eq!(returned.auto_switch_threshold, 77.0);
         assert_eq!(store.load().unwrap().auto_switch_threshold, 77.0);
+        let _ = fs::remove_dir_all(store.root_dir());
+    }
+
+    #[test]
+    fn save_preserves_newer_gateway_runtime_state() {
+        let store = temp_store("gateway-runtime-merge");
+        let mut initial = StoredState::default();
+        initial.accounts.push(Account {
+            id: "acc1".to_string(),
+            tool_id: ToolId::Claude,
+            name: "acc1".to_string(),
+            state: AccountState::Idle,
+            fingerprint: "fingerprint".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_used_at: None,
+            quota: None,
+            launcher_command: None,
+            launcher_paths: None,
+            is_default: false,
+            avatar_url: None,
+            account_email: None,
+            api_provider: None,
+            quota_status: None,
+            codex_login_method: Default::default(),
+        });
+        initial.api_gateway.accounts.push(ApiGatewayAccount {
+            tool_id: ToolId::Claude,
+            account_id: "acc1".to_string(),
+            enabled: true,
+            state: ApiPoolAccountState::Available,
+            cooldown_until: None,
+            error: None,
+        });
+        store.save(&initial).unwrap();
+
+        store
+            .update(|data| {
+                let entry = data.api_gateway.accounts.first_mut().unwrap();
+                entry.state = ApiPoolAccountState::CoolingDown;
+                entry.cooldown_until = Some("2026-08-07T15:00:00Z".to_string());
+                entry.error = Some("rate limited".to_string());
+            })
+            .unwrap();
+
+        // Simulate an app-state writer holding a stale snapshot while the gateway worker updates
+        // its runtime state through Store::update.
+        let mut stale = initial;
+        stale.auto_switch_threshold = 88.0;
+        store.save(&stale).unwrap();
+
+        let persisted = store.load().unwrap();
+        let entry = persisted.api_gateway.accounts.first().unwrap();
+        assert_eq!(persisted.auto_switch_threshold, 88.0);
+        assert_eq!(entry.state, ApiPoolAccountState::CoolingDown);
+        assert_eq!(entry.cooldown_until.as_deref(), Some("2026-08-07T15:00:00Z"));
+        assert_eq!(entry.error.as_deref(), Some("rate limited"));
         let _ = fs::remove_dir_all(store.root_dir());
     }
 
