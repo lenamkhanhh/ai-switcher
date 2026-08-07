@@ -3380,6 +3380,20 @@ mod tests {
     }
 
     #[test]
+    fn account_names_sort_by_numeric_segments() {
+        let mut names = vec![
+            "acc10".to_string(),
+            "acc2".to_string(),
+            "acc11".to_string(),
+            "acc1".to_string(),
+        ];
+
+        names.sort_by(|left, right| natural_name_cmp(left, right));
+
+        assert_eq!(names, ["acc1", "acc2", "acc10", "acc11"]);
+    }
+
+    #[test]
     fn exhausted_active_account_still_triggers_auto_switch() {
         let active = test_account("acc-1", AccountState::Exhausted, 100.0);
         let replacement = test_account("acc-2", AccountState::Idle, 20.0);
