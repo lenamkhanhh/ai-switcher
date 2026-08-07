@@ -26,6 +26,7 @@ use crate::tools::{
 };
 use crate::vault::VaultService;
 use anyhow::{Context, Result};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -2665,6 +2666,75 @@ fn retire_auto_ping_settings(data: &mut StoredState) {
     data.schema_version = data.schema_version.max(2);
 }
 
+fn natural_name_cmp(left: &str, right: &str) -> Ordering {
+    let left_chunks = natural_chunks(left);
+    let right_chunks = natural_chunks(right);
+
+    for ((left_chunk, left_is_digit), (right_chunk, right_is_digit)) in
+        left_chunks.iter().zip(right_chunks.iter())
+    {
+        let order = if *left_is_digit && *right_is_digit {
+            let left_significant = left_chunk.trim_start_matches('0');
+            let right_significant = right_chunk.trim_start_matches('0');
+            let left_significant = if left_significant.is_empty() {
+                "0"
+            } else {
+                left_significant
+            };
+            let right_significant = if right_significant.is_empty() {
+                "0"
+            } else {
+                right_significant
+            };
+
+            left_significant
+                .len()
+                .cmp(&right_significant.len())
+                .then_with(|| left_significant.cmp(right_significant))
+                .then_with(|| left_chunk.len().cmp(&right_chunk.len()))
+        } else {
+            left_chunk.cmp(right_chunk)
+        };
+
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+
+    left_chunks
+        .len()
+        .cmp(&right_chunks.len())
+        .then_with(|| left.cmp(right))
+}
+
+fn natural_chunks(value: &str) -> Vec<(&str, bool)> {
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_is_digit = None;
+
+    for (index, character) in value.char_indices() {
+        let is_digit = character.is_ascii_digit();
+        match chunk_is_digit {
+            None => {
+                chunk_start = index;
+                chunk_is_digit = Some(is_digit);
+            }
+            Some(previous_is_digit) if previous_is_digit != is_digit => {
+                chunks.push((&value[chunk_start..index], previous_is_digit));
+                chunk_start = index;
+                chunk_is_digit = Some(is_digit);
+            }
+            Some(_) => {}
+        }
+    }
+
+    if let Some(is_digit) = chunk_is_digit {
+        chunks.push((&value[chunk_start..], is_digit));
+    }
+
+    chunks
+}
+
 fn build_snapshot(
     store: &Store,
     data: &StoredState,
@@ -2683,11 +2753,11 @@ fn build_snapshot(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            // Default first, the rest by name.
+            // Default first, then names in natural order (`acc2` before `acc10`).
             accounts.sort_by(|a, b| {
                 b.is_default
                     .cmp(&a.is_default)
-                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| natural_name_cmp(&a.name, &b.name))
             });
             // Antigravity: attach the Google avatar (account identity) for the UI to display.
             if matches!(tool_id, ToolId::Antigravity) {
