@@ -973,3 +973,10 @@ Sau thay đổi hoặc rollback: mở thread mới/restart Codex và ghi sự ki
 - Removed 66 exact files totaling 3.94 GiB: downloadable installer packages selected by installer/setup product naming, ZIP archives whose complete extracted trees were verified file-by-file, redundant byte-identical copies while preserving one copy, and three standalone installer files at the D-drive/Code roots. The D-drive recycle bin was also emptied after measuring approximately 605 MiB.
 - Verification: zero selected files were skipped or locked. Preserved copies of the exact-duplicate documents/images/archives remain, all verified extracted directories remain, all key data roots exist, and the parent Git working-tree status remains the same eleven pre-existing tracked changes.
 - Result: D-drive free space increased from 89.43 GB to 93.97 GB (48.1%), a measured gain of 4.54 GB. The removed files are not recoverable from the recycle bin; installers can be downloaded again, and deleted duplicate/archive content remains represented by its preserved copy or verified extracted directory.
+
+### 2026-08-10 - Codex profile ACL recovery
+
+- Symptom: the pinned app showed `Codex authentication missing: Access is denied (os error 5)` for every Codex account, while account metadata remained visible.
+- Diagnosis: the app-owned `data\accounts\codex` directory had an empty ACL; the 13 profile directories and their `auth.json` files were therefore unreadable even though the state file was intact.
+- Repair: stopped only the exact AI Account Switcher process, granted the current user and SYSTEM full control with container/file inheritance on that exact app-owned Codex directory tree, and restarted the pinned executable. No token contents, profile files, or account state values were rewritten.
+- Verification: 13 profile `auth.json` files are visible again; the app is responding with one native window, and the persisted Codex state now reports `idle: 7, exhausted: 7` with no quota authentication errors.
