@@ -858,6 +858,17 @@ mod tests {
     }
 
     #[test]
+    fn capacity_message_without_structured_code_is_server_overloaded() {
+        assert_eq!(
+            classify_codex_error(
+                &json!({"message": "Selected model is at capacity. Please try a different model."}),
+                Some("failed")
+            ),
+            RecoveryErrorKind::ServerOverloaded
+        );
+    }
+
+    #[test]
     fn fixture_requires_exact_thread_and_turn_started_ack() {
         let messages = vec![
             json!({"method":"turn/started","params":{"threadId":"other","turn":{"id":"turn-1"}}}),

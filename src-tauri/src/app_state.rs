@@ -4471,6 +4471,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_codex_model_capacity_error_lines() {
+        assert!(codex_quota_error_line(
+            r#"{"type":"event_msg","payload":{"type":"error","message":"Selected model is at capacity. Please try a different model."}}"#
+        ));
+        assert!(codex_quota_error_line(
+            r#"{"type":"event_msg","payload":{"type":"error","codexErrorInfo":"serverOverloaded"}}"#
+        ));
+        assert!(!codex_quota_error_line(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"at capacity"}]}}"#
+        ));
+    }
+
+    #[test]
     fn ignores_quota_words_inside_new_chat_rollout_content() {
         assert!(!codex_quota_error_line(
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Create a new chat that explains rate limit exceeded handling"}]}}"#
