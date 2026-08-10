@@ -205,8 +205,73 @@ export interface AutoPingSetting {
   lastConfirmedReset?: string | null;
   retryCount: number;
 }
-export type ResumeJobStatus = "queued" | "checkpointed" | "switching" | "resumed" | "failed" | "cancelled";
-export interface ResumeJob { id: string; sessionId: string; eventKey: string; cwd: string; fromAccountId: string; toAccountId?: string | null; checkpointPath: string; status: ResumeJobStatus; createdAt: string; updatedAt: string; error?: string | null }
+export type ResumeJobStatus =
+  | "queued"
+  | "detected"
+  | "awaitingTerminal"
+  | "checkpointing"
+  | "checkpointed"
+  | "candidateVerified"
+  | "switching"
+  | "threadResuming"
+  | "threadResumed"
+  | "goalVerified"
+  | "turnStarting"
+  | "turnStarted"
+  | "recovered"
+  | "monitoring"
+  | "completed"
+  | "retrying"
+  | "needsAttention"
+  | "resumed"
+  | "failed"
+  | "cancelled";
+export type RecoveryErrorKind =
+  | "usageLimitExceeded"
+  | "serverOverloaded"
+  | "responseStreamDisconnected"
+  | "responseStreamConnectionFailed"
+  | "httpConnectionFailed"
+  | "unauthorized"
+  | "contextWindowExceeded"
+  | "sandboxError"
+  | "userCancelled"
+  | "unknown";
+export interface GoalSnapshot {
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+}
+export interface ResumeJob {
+  id: string;
+  schemaVersion?: number;
+  recoveryId?: string;
+  sessionId: string;
+  threadId?: string;
+  failedTurnId?: string;
+  resumedTurnId?: string | null;
+  eventKey: string;
+  cwd: string;
+  fromAccountId: string;
+  toAccountId?: string | null;
+  checkpointPath: string;
+  rolloutPath?: string;
+  rolloutOffset?: number;
+  terminalErrorKind?: RecoveryErrorKind | null;
+  terminalErrorFingerprint?: string | null;
+  manifestPath?: string | null;
+  recoveryMarker?: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  personality?: string | null;
+  goalSnapshot?: GoalSnapshot | null;
+  attempt?: number;
+  status: ResumeJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  lastAckAt?: string | null;
+  error?: string | null;
+}
 
 export interface AutoPrimeDayStat {
   date: string;

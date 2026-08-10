@@ -534,6 +534,12 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
     demoSnapshot.disclaimerAccepted = true;
     return structuredClone(demoSnapshot) as T;
   }
+  if (command === "cancel_resume_job" || command === "retry_resume_job" || command === "open_resume_job") {
+    const jobId = String(args?.jobId ?? "");
+    const job = demoSnapshot.resumeJobs.find((item) => item.id === jobId);
+    if (job && command === "cancel_resume_job") job.status = "cancelled";
+    return structuredClone(demoSnapshot) as T;
+  }
   throw new Error("Desktop commands only run inside the Tauri app");
 }
 
@@ -552,6 +558,9 @@ export const api = {
     invoke<string[]>("fetch_gateway_models", { baseUrl, apiKey }),
   renameAccount: (input: RenameAccountInput) => invoke<AppSnapshot>("rename_account", { input }),
   switchAccount: (input: SwitchAccountInput) => invoke<AppSnapshot>("switch_account", { input }),
+  retryResumeJob: (jobId: string) => invoke<AppSnapshot>("retry_resume_job", { jobId }),
+  cancelResumeJob: (jobId: string) => invoke<AppSnapshot>("cancel_resume_job", { jobId }),
+  openResumeJob: (jobId: string) => invoke<AppSnapshot>("open_resume_job", { jobId }),
   setLauncher: (input: SetLauncherInput) => invoke<AppSnapshot>("set_launcher", { input }),
   deleteAccount: (toolId: ToolId, accountId: string) =>
     invoke<AppSnapshot>("delete_account", { toolId, accountId }),

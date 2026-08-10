@@ -159,6 +159,8 @@ import type {
   ToolSetup,
   ToolId,
   ToolStatus,
+  ResumeJob,
+  ResumeJobStatus,
   VaultCredential,
   VaultCredentialInput,
   VaultStatus,
@@ -218,6 +220,48 @@ const emptyVaultStatus: VaultStatus = {
   recordCount: 0,
 };
 
+function recoveryStatusLabel(status: ResumeJobStatus): string {
+  switch (status) {
+    case "awaitingTerminal": return "Waiting for turn";
+    case "detected":
+    case "candidateVerified":
+    case "queued": return "Checking account";
+    case "checkpointing":
+    case "checkpointed": return "Checkpointing";
+    case "switching": return "Switching";
+    case "threadResuming":
+    case "threadResumed":
+    case "goalVerified": return "Resuming thread";
+    case "turnStarting": return "Starting turn";
+    case "turnStarted":
+    case "recovered":
+    case "monitoring":
+    case "resumed": return "Running";
+    case "retrying": return "Retrying";
+    case "needsAttention":
+    case "failed": return "Needs attention";
+    case "completed": return "Completed";
+    case "cancelled": return "Cancelled";
+    default: return "Checking account";
+  }
+}
+
+function recoveryDefaultMessage(job: ResumeJob): string {
+  if (job.status === "awaitingTerminal") {
+    return "Waiting for the current Codex turn to finish before switching accounts.";
+  }
+  if (job.status === "retrying") {
+    return job.error ?? "The selected model is temporarily at capacity. Retrying without switching accounts…";
+  }
+  if (job.status === "needsAttention" || job.status === "failed") {
+    return job.error ?? "Resume could not be verified.";
+  }
+  if (job.status === "recovered" || job.status === "monitoring" || job.status === "resumed") {
+    return "Task resumed and is running.";
+  }
+  return "Codex is preparing a durable task recovery.";
+}
+
 interface AutoSwitchHandoffEvent {
   path: string;
   prompt: string;
@@ -259,6 +303,13 @@ export function App() {
   const [setupPrompted, setSetupPrompted] = useState<Set<ToolId>>(new Set());
   // Last Codex device code we raised a toast for, so a repeated event can't re-announce it.
   const announcedDeviceCode = useRef<string | null>(null);
+  const visibleRecoveryJob = useMemo(
+    () =>
+      [...snapshot.resumeJobs]
+        .reverse()
+        .find((job) => job.status !== "cancelled" && job.status !== "completed"),
+    [snapshot.resumeJobs],
+  );
 
   useEffect(() => {
     try {
@@ -807,6 +858,51 @@ export function App() {
           <button className="iconButton" onClick={() => setAutoSwitchBanner(null)} title="Dismiss">
             <X />
           </button>
+        </section>
+      )}
+
+      {visibleRecoveryJob && (
+        <section
+          className={`recoveryBanner ${visibleRecoveryJob.status === "needsAttention" || visibleRecoveryJob.status === "failed" ? "attention" : ""}`}
+          role={visibleRecoveryJob.status === "needsAttention" || visibleRecoveryJob.status === "failed" ? "alert" : "status"}
+        >
+          <RotateCcw />
+          <div className="recoveryBannerText">
+            <strong>{recoveryStatusLabel(visibleRecoveryJob.status)}</strong>
+            <span>{recoveryDefaultMessage(visibleRecoveryJob)}</span>
+          </div>
+          {(visibleRecoveryJob.status === "turnStarted" ||
+            visibleRecoveryJob.status === "recovered" ||
+            visibleRecoveryJob.status === "monitoring" ||
+            visibleRecoveryJob.status === "resumed") && (
+            <button
+              type="button"
+              disabled={busy === `resume-open-${visibleRecoveryJob.id}`}
+              onClick={() => void run(`resume-open-${visibleRecoveryJob.id}`, () => api.openResumeJob(visibleRecoveryJob.id))}
+            >
+              Open thread
+            </button>
+          )}
+          {(visibleRecoveryJob.status === "needsAttention" || visibleRecoveryJob.status === "failed") && (
+            <button
+              type="button"
+              disabled={busy === `resume-retry-${visibleRecoveryJob.id}`}
+              onClick={() => void run(`resume-retry-${visibleRecoveryJob.id}`, () => api.retryResumeJob(visibleRecoveryJob.id))}
+            >
+              Retry
+            </button>
+          )}
+          {visibleRecoveryJob.status !== "needsAttention" && visibleRecoveryJob.status !== "failed" && (
+            <button
+              type="button"
+              className="iconButton"
+              disabled={busy === `resume-cancel-${visibleRecoveryJob.id}`}
+              title="Cancel recovery"
+              onClick={() => void run(`resume-cancel-${visibleRecoveryJob.id}`, () => api.cancelResumeJob(visibleRecoveryJob.id))}
+            >
+              <X />
+            </button>
+          )}
         </section>
       )}
 

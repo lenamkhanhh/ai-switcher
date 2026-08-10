@@ -104,7 +104,9 @@ impl Default for StoredState {
 }
 
 fn current_schema_version() -> u32 {
-    2
+    // Version 3 adds the durable transactional recovery fields. Every new field is serde-defaulted
+    // so older state files remain readable and are upgraded in place on the next save.
+    3
 }
 
 #[derive(Clone)]
@@ -286,6 +288,16 @@ pub fn normalize_account_states(
             account.state.clone()
         };
     }
+}
+
+/// Narrow wrappers keep recovery-manifest permission calls independent from the store's
+/// platform-specific implementation and from other account-data permission callers.
+pub(crate) fn set_recovery_manifest_permissions(path: &std::path::Path) -> Result<()> {
+    set_owner_only_permissions(path)
+}
+
+pub(crate) fn set_recovery_manifest_directory_permissions(path: &std::path::Path) -> Result<()> {
+    set_owner_only_directory_permissions(path)
 }
 
 #[cfg(test)]

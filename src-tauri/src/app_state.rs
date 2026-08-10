@@ -1,13 +1,18 @@
+use crate::codex_app_server::{
+    classify_terminal_turn, recovery_error_message, terminal_error_fingerprint, AppServerConfig,
+    CodexAppServerClient,
+};
 use crate::codex_import::{codex_auth_json, parse_k12_export};
 use crate::models::{
     Account, AccountState, AddAccountInput, AddApiAccountInput, ApiGatewayAccount, ApiGatewayCombo,
     ApiGatewayConfig, ApiGatewayKey, ApiGatewayServerState, ApiGatewaySnapshot, ApiProvider,
     ApiUsageReport, AppSnapshot, AutoSwitchSetting, CodexLoginMethod, CreateApiGatewayKeyInput,
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
-    DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput, QuotaInfo, RenameAccountInput,
-    SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
-    StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport, UsageReports,
-    VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
+    DeleteApiGatewayKeyInput, DetectionReport, GoalSnapshot, ImportCodexAccountInput, QuotaInfo,
+    RecoveryErrorKind, RecoveryPlanStep, RecoveryRuntimeSnapshot, RenameAccountInput, ResumeJob,
+    ResumeJobStatus, SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput,
+    SetToolSetupInput, StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport,
+    UsageReports, VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
 };
 use crate::quota::{codex_account_email, read_quota};
 use crate::store::{normalize_account_states, Store, StoredState};
@@ -1349,9 +1354,9 @@ impl ManagedState {
         forced_quota_error: bool,
         app: Option<&AppHandle>,
     ) -> Result<bool> {
-        use crate::models::{ResumeJob, ResumeJobStatus};
-        // Re-entered from the post-switch refresh below → the outer handoff is already handling
-        // this quota event.
+        // Re-entered from a quota refresh or the ten-second watcher while the same transaction is
+        // active. A recovery is single-flight: another observer must read the durable job rather
+        // than start a second credential switch or turn.
         if self
             .codex_handoff_running
             .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -1360,7 +1365,7 @@ impl ManagedState {
         }
         let _handoff_guard = FlagGuard(&self.codex_handoff_running);
 
-        let (current, event_key, used, explicit_quota_error) = {
+        let (current, used, explicit_quota_error, binary, default_dir) = {
             let data = self
                 .data
                 .lock()
@@ -1390,229 +1395,1011 @@ impl ManagedState {
             if !crate::seamless::should_start_handoff(used, explicit_quota_error, threshold) {
                 return Ok(false);
             }
-            let event = account
-                .quota
-                .as_ref()
-                .and_then(|q| q.five_hour.reset_at.clone())
-                .unwrap_or_else(|| {
-                    used.map(|value| format!("five-hour-{value:.2}"))
-                        .unwrap_or_else(|| "quota-error-unknown-window".into())
-                });
-            (account.clone(), event, used, explicit_quota_error)
+            (
+                account.clone(),
+                used,
+                explicit_quota_error,
+                configured_binary_path(&data, &ToolId::Codex),
+                resolved_default_config_dir(&data, &ToolId::Codex),
+            )
         };
 
+        // A quota poll can run without a task. That is still an ordinary account-rotation case;
+        // the transactional path is entered only when the watcher has bound an exact rollout.
         let rollout = self
             .codex_active_rollout
             .lock()
             .ok()
             .and_then(|path| path.clone());
-        let checkpoint_result = match rollout {
-            Some(path) => crate::handoff::checkpoint_from_rollout(
-                &path,
-                &self.store.handoff_dir(),
-                &current.name,
-            )?,
-            // A quota poll often runs when there is no active Codex rollout (for example, the
-            // user is in a terminal or hasn't started a task yet). There is nothing to resume,
-            // but quota rotation must still happen through the ordinary switch path.
-            None => return Ok(false),
+        let Some(rollout) = rollout else {
+            return Ok(false);
         };
-        let Some((mut checkpoint, checkpoint_path)) = checkpoint_result else {
+        let Some(binary) = binary else {
+            self.emit_recovery_message(
+                app,
+                "Resume could not be verified: Codex CLI is not configured.",
+            );
             return Ok(true);
         };
-        if !crate::seamless::should_checkpoint(
-            used.or(explicit_quota_error.then_some(100.0)),
-            checkpoint.idle,
-        ) {
-            return Ok(true);
-        }
 
-        let candidate = {
-            let mut data = self
-                .data
-                .lock()
-                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            for job in data.resume_jobs.iter_mut().filter(|job| {
-                job.session_id == checkpoint.session_id
-                    && matches!(
-                        job.status,
-                        ResumeJobStatus::Queued | ResumeJobStatus::Checkpointed
-                    )
-            }) {
-                if checkpoint.created_at > job.updated_at {
-                    job.status = ResumeJobStatus::Cancelled;
-                    job.updated_at = now();
-                    job.error = Some("session continued manually".into());
-                }
-            }
-            if crate::seamless::is_duplicate(&data.resume_jobs, &checkpoint.session_id, &event_key)
-            {
+        let workspace_cwd =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let server_cwd = workspace_cwd.clone();
+        let config = AppServerConfig::new(binary.clone(), default_dir.clone(), server_cwd);
+        let mut client = match CodexAppServerClient::connect(&config) {
+            Ok(client) => client,
+            Err(error) => {
+                self.emit_recovery_message(
+                    app,
+                    &format!(
+                        "Resume could not be verified: {}.",
+                        crate::codex_app_server::redact_text(&error.to_string())
+                    ),
+                );
                 return Ok(true);
             }
-            let timestamp = now();
-            data.resume_jobs.push(ResumeJob {
-                id: Uuid::new_v4().to_string(),
-                session_id: checkpoint.session_id.clone(),
-                event_key: event_key.clone(),
-                cwd: checkpoint.cwd.clone(),
-                from_account_id: current.id.clone(),
-                to_account_id: None,
-                checkpoint_path: checkpoint_path.to_string_lossy().to_string(),
-                status: ResumeJobStatus::Checkpointed,
-                created_at: timestamp.clone(),
-                updated_at: timestamp,
-                error: None,
-            });
-            // A quota-number switch must move to an account with more headroom; a switch forced
-            // by a real quota error can't trust the numbers, so it takes the best available.
-            let must_improve_on = if explicit_quota_error { None } else { used };
-            let selected =
-                crate::seamless::select_candidate(&data.accounts, &current.id, must_improve_on)
-                    .cloned();
-            if let Some(candidate) = &selected {
-                let job = data.resume_jobs.last_mut().expect("just pushed");
-                job.to_account_id = Some(candidate.id.clone());
-                job.status = ResumeJobStatus::Switching;
-                job.updated_at = now();
-            }
-            self.store.save(&data)?;
-            selected
         };
-        let Some(candidate) = candidate else {
-            if let Ok(mut data) = self.data.lock() {
-                if let Some(job) = data.resume_jobs.iter_mut().rev().find(|job| {
-                    job.session_id == checkpoint.session_id && job.event_key == event_key
-                }) {
-                    job.status = ResumeJobStatus::Failed;
-                    job.error =
-                        Some("no eligible candidate with healthy auth and weekly quota".into());
-                    job.updated_at = now();
-                }
-                let _ = self.store.save(&data);
-            }
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "auto-switched",
-                    "Checkpoint saved; no eligible Codex account is below 95%.",
-                );
-            }
+
+        // The App Server is authoritative for thread identity and turn state. A rollout filename
+        // is only an observation/binding for the watcher, never a reason to switch on its text.
+        let Some(thread_hint) = crate::handoff::thread_id_from_rollout(&rollout)
+            .ok()
+            .flatten()
+        else {
+            self.emit_recovery_message(
+                app,
+                "Resume could not be verified: the rollout did not contain an exact thread id.",
+            );
             return Ok(true);
         };
-        checkpoint.current_account = Some(candidate.name.clone());
-        if let Ok(json) = serde_json::to_vec_pretty(&checkpoint) {
-            let _ = std::fs::write(&checkpoint_path, json);
+        let snapshot = match client.read_thread(&thread_hint) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.emit_recovery_message(
+                    app,
+                    &format!(
+                        "Resume could not be verified: {}.",
+                        crate::codex_app_server::redact_text(&error.to_string())
+                    ),
+                );
+                return Ok(true);
+            }
+        };
+        let thread_id = snapshot.thread_id.clone();
+        let cwd = if snapshot.runtime.cwd.is_empty() {
+            workspace_cwd.to_string_lossy().to_string()
+        } else {
+            snapshot.runtime.cwd.clone()
+        };
+        if snapshot.active_turn().is_some() {
+            let job_id =
+                self.persist_waiting_resume_job(&thread_id, &current.id, &cwd, &rollout)?;
+            self.update_resume_job(&job_id, |job| {
+                job.status = ResumeJobStatus::AwaitingTerminal;
+                job.error = None;
+            })?;
+            self.emit_recovery_message(
+                app,
+                "Waiting for the current Codex turn to finish before switching accounts.",
+            );
+            return Ok(true);
         }
 
-        let failure = |message: String| -> Result<bool> {
+        let terminal = snapshot.turns.iter().rev().find(|turn| turn.is_terminal());
+        let failed_turn_id = terminal
+            .map(|turn| turn.id.clone())
+            .unwrap_or_else(|| format!("planned-{thread_id}"));
+        let (failure_kind, failure_message) = if forced_quota_error {
+            if let Some(turn) = terminal.filter(|turn| {
+                matches!(turn.status.as_str(), "failed" | "interrupted" | "cancelled")
+            }) {
+                (classify_terminal_turn(turn), recovery_error_message(turn))
+            } else {
+                (RecoveryErrorKind::Unknown, None)
+            }
+        } else if let Some(turn) = terminal
+            .filter(|turn| matches!(turn.status.as_str(), "failed" | "interrupted" | "cancelled"))
+        {
+            (classify_terminal_turn(turn), recovery_error_message(turn))
+        } else {
+            // Planned handoff: the threshold was reached, the current turn is already terminal,
+            // and the next turn can be accepted on a preflighted account without replaying work.
+            (RecoveryErrorKind::UsageLimitExceeded, None)
+        };
+        let fingerprint = terminal_error_fingerprint(
+            failure_kind,
+            failure_message.as_deref().or(Some("planned handoff")),
+        );
+        let goal = client
+            .read_goal(&thread_id)
+            .context("Could not read the Codex Goal")?;
+        let goal_for_manifest = goal.clone().unwrap_or_default();
+        let runtime = snapshot.runtime.clone();
+        let rollout_offset = std::fs::metadata(&rollout)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+
+        let (job_id, recovery_id, attempt) = {
             let mut data = self
                 .data
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            if let Some(job) = data
-                .resume_jobs
-                .iter_mut()
-                .rev()
-                .find(|j| j.session_id == checkpoint.session_id && j.event_key == event_key)
-            {
-                job.status = ResumeJobStatus::Failed;
-                job.error = Some(message.clone());
-                job.updated_at = now();
+            let duplicate = crate::seamless::is_recovery_duplicate(
+                &data.resume_jobs,
+                &thread_id,
+                &failed_turn_id,
+                &fingerprint,
+            );
+            let existing_index = data.resume_jobs.iter().position(|job| {
+                (duplicate
+                    && job.thread_id == thread_id
+                    && job.failed_turn_id == failed_turn_id
+                    && job.terminal_error_fingerprint.as_deref() == Some(fingerprint.as_str()))
+                    || (job.thread_id == thread_id
+                        && job.status == ResumeJobStatus::AwaitingTerminal)
+            });
+            if let Some(index) = existing_index {
+                let existing = &data.resume_jobs[index];
+                if existing.status.is_acknowledged()
+                    || matches!(
+                        existing.status,
+                        ResumeJobStatus::NeedsAttention
+                            | ResumeJobStatus::Failed
+                            | ResumeJobStatus::Cancelled
+                    )
+                {
+                    return Ok(true);
+                }
+                let id = existing.id.clone();
+                let recovery_id = if existing.recovery_id.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    existing.recovery_id.clone()
+                };
+                let attempt = existing.attempt.max(1);
+                let timestamp = now();
+                let job = &mut data.resume_jobs[index];
+                job.recovery_id = recovery_id.clone();
+                job.thread_id = thread_id.clone();
+                job.session_id = thread_id.clone();
+                job.failed_turn_id = failed_turn_id.clone();
+                job.cwd = cwd.clone();
+                job.rollout_path = rollout.to_string_lossy().to_string();
+                job.rollout_offset = rollout_offset;
+                job.terminal_error_kind = Some(failure_kind);
+                job.terminal_error_fingerprint = Some(fingerprint.clone());
+                job.model = runtime.model.clone();
+                job.reasoning_effort = runtime.reasoning_effort.clone();
+                job.personality = runtime.personality.clone();
+                job.approval_policy = runtime.approval_policy.clone();
+                job.sandbox_policy = runtime.sandbox_policy.clone();
+                job.goal_snapshot = goal.clone();
+                job.status = ResumeJobStatus::Checkpointing;
+                job.updated_at = timestamp;
+                job.error = None;
+                self.store.save(&data)?;
+                (id, recovery_id, attempt)
+            } else {
+                let timestamp = now();
+                let id = Uuid::new_v4().to_string();
+                let recovery_id = Uuid::new_v4().to_string();
+                let job = ResumeJob {
+                    id: id.clone(),
+                    schema_version: 3,
+                    recovery_id: recovery_id.clone(),
+                    session_id: thread_id.clone(),
+                    thread_id: thread_id.clone(),
+                    failed_turn_id: failed_turn_id.clone(),
+                    resumed_turn_id: None,
+                    event_key: fingerprint.clone(),
+                    cwd: cwd.clone(),
+                    from_account_id: current.id.clone(),
+                    to_account_id: None,
+                    checkpoint_path: String::new(),
+                    rollout_path: rollout.to_string_lossy().to_string(),
+                    rollout_offset,
+                    terminal_error_kind: Some(failure_kind),
+                    terminal_error_fingerprint: Some(fingerprint.clone()),
+                    manifest_path: None,
+                    recovery_marker: Some(crate::handoff::marker(&recovery_id, 1)),
+                    model: runtime.model.clone(),
+                    reasoning_effort: runtime.reasoning_effort.clone(),
+                    personality: runtime.personality.clone(),
+                    approval_policy: runtime.approval_policy.clone(),
+                    sandbox_policy: runtime.sandbox_policy.clone(),
+                    goal_snapshot: goal.clone(),
+                    attempt: 1,
+                    status: ResumeJobStatus::Checkpointing,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                    last_ack_at: None,
+                    error: None,
+                };
+                data.resume_jobs.push(job);
+                self.store.save(&data)?;
+                (id, recovery_id, 1)
             }
-            self.store.save(&data)?;
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "auto-switched",
-                    format!("Seamless resume failed: {message}"),
-                );
-            }
-            Ok(true)
         };
 
-        if let Err(error) = self.switch_account(SwitchAccountInput {
-            tool_id: ToolId::Codex,
-            account_id: candidate.id.clone(),
-        }) {
-            return failure(error.to_string());
+        let mut plan = crate::handoff::plan_from_thread(&snapshot);
+        if plan.is_empty() {
+            plan.push(RecoveryPlanStep {
+                id: "continue-first-incomplete-step".into(),
+                description: "Continue the first incomplete Goal plan step".into(),
+                status: "incomplete".into(),
+            });
         }
-        if let Err(error) = self.refresh_single_account(&ToolId::Codex, &candidate.id, app) {
-            return failure(format!("auth/quota verification failed: {error}"));
+        let manifest = crate::handoff::manifest_from_thread(
+            &recovery_id,
+            &failed_turn_id,
+            failure_kind,
+            failure_message.as_deref(),
+            &snapshot,
+            goal_for_manifest,
+            plan,
+            crate::handoff::workspace_snapshot(std::path::Path::new(&cwd)),
+            vec![],
+        );
+        let manifest_path =
+            crate::handoff::write_manifest_atomic(&self.store.handoff_dir(), &manifest)?;
+        self.update_resume_job(&job_id, |job| {
+            job.checkpoint_path = manifest_path.to_string_lossy().to_string();
+            job.manifest_path = Some(manifest_path.to_string_lossy().to_string());
+            job.recovery_marker = Some(crate::handoff::marker(&recovery_id, attempt));
+            job.status = ResumeJobStatus::Checkpointed;
+        })?;
+
+        if failure_kind != RecoveryErrorKind::UsageLimitExceeded {
+            let message = recovery_attention_message(failure_kind);
+            if is_same_account_retryable(failure_kind) {
+                let next_attempt = self.schedule_capacity_retry(&job_id, &message)?;
+                if let Some(next_attempt) = next_attempt {
+                    self.emit_recovery_message(app, &message);
+                    drop(client);
+                    std::thread::sleep(recovery_retry_delay(next_attempt));
+                    if let Err(error) = self.retry_same_account(
+                        &job_id,
+                        &thread_id,
+                        &runtime,
+                        goal.as_ref(),
+                        &manifest_path,
+                        &recovery_id,
+                        next_attempt,
+                        &current.name,
+                        &binary,
+                        &default_dir,
+                        &cwd,
+                        app,
+                    ) {
+                        self.mark_resume_attention(
+                            &job_id,
+                            format!(
+                                "Resume could not be verified: {}.",
+                                crate::codex_app_server::redact_text(&error.to_string())
+                            ),
+                            app,
+                        )?;
+                    }
+                    return Ok(true);
+                }
+            }
+            self.mark_resume_attention(&job_id, message.clone(), app)?;
+            return Ok(true);
         }
-        {
+
+        drop(client);
+        let candidates = {
             let data = self
                 .data
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            let verified = data
-                .accounts
+            crate::seamless::rank_candidates(
+                &data.accounts,
+                &current.id,
+                if explicit_quota_error { None } else { used },
+            )
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        };
+        let retry_target = self.data.lock().ok().and_then(|data| {
+            data.resume_jobs
                 .iter()
-                .find(|account| account.tool_id == ToolId::Codex && account.id == candidate.id)
-                .and_then(|account| account.quota.as_ref())
-                .is_some_and(|quota| {
-                    quota.error.is_none()
-                        && quota
-                            .five_hour
-                            .percent_used
-                            .is_none_or(|value| value < 95.0)
-                        && quota.weekly.percent_used.is_some_and(|value| value < 100.0)
-                });
-            if !verified {
-                drop(data);
-                return failure(
-                    "auth/quota verification returned invalid or exhausted quota".into(),
+                .find(|job| job.id == job_id)
+                .and_then(|job| job.to_account_id.clone())
+        });
+        let mut selected = retry_target
+            .as_deref()
+            .filter(|account_id| *account_id == current.id)
+            .map(|_| current.clone());
+        let mut preflight_reason = None;
+        if selected.is_none() {
+            for candidate in candidates {
+                let candidate_home =
+                    account_config_dir_with_default(&self.store, &candidate, &default_dir);
+                let candidate_config = AppServerConfig::new(
+                    binary.clone(),
+                    candidate_home,
+                    std::path::PathBuf::from(&cwd),
                 );
+                let mut candidate_client = match CodexAppServerClient::connect(&candidate_config) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        preflight_reason =
+                            Some(crate::codex_app_server::redact_text(&error.to_string()));
+                        continue;
+                    }
+                };
+                match candidate_client.preflight_candidate(
+                    runtime.model.as_deref(),
+                    runtime.reasoning_effort.as_deref(),
+                    used,
+                ) {
+                    Ok(result) if result.eligible => {
+                        selected = Some(candidate);
+                        break;
+                    }
+                    Ok(result) => preflight_reason = result.reason,
+                    Err(error) => {
+                        preflight_reason =
+                            Some(crate::codex_app_server::redact_text(&error.to_string()))
+                    }
+                }
             }
         }
-        let (config_dir, binary) = {
+        let Some(candidate) = selected else {
+            self.mark_resume_attention(
+                &job_id,
+                "No eligible Codex account has enough quota to continue this task.".into(),
+                app,
+            )?;
+            let _ = preflight_reason;
+            return Ok(true);
+        };
+        self.update_resume_job(&job_id, |job| {
+            job.to_account_id = Some(candidate.id.clone());
+            job.status = ResumeJobStatus::CandidateVerified;
+        })?;
+        self.emit_recovery_message(
+            app,
+            &format!(
+                "Codex quota reached. Recovering this task with {}…",
+                candidate.name
+            ),
+        );
+
+        self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::Switching)?;
+        if let Err(error) = self.commit_recovery_account_switch(&candidate) {
+            self.mark_resume_attention(
+                &job_id,
+                format!(
+                    "Resume could not be verified: {}.",
+                    crate::codex_app_server::redact_text(&error.to_string())
+                ),
+                app,
+            )?;
+            return Ok(true);
+        }
+
+        self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::ThreadResuming)?;
+        let recovery_config =
+            AppServerConfig::new(binary, default_dir, std::path::PathBuf::from(&cwd));
+        let mut recovery_client = match CodexAppServerClient::connect(&recovery_config) {
+            Ok(client) => client,
+            Err(error) => {
+                self.mark_resume_attention(
+                    &job_id,
+                    format!(
+                        "Resume could not be verified: {}.",
+                        crate::codex_app_server::redact_text(&error.to_string())
+                    ),
+                    app,
+                )?;
+                return Ok(true);
+            }
+        };
+        let resumed = match recovery_client.resume_thread(&thread_id, &runtime) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.mark_resume_attention(
+                    &job_id,
+                    format!(
+                        "Resume could not be verified: {}.",
+                        crate::codex_app_server::redact_text(&error.to_string())
+                    ),
+                    app,
+                )?;
+                return Ok(true);
+            }
+        };
+        self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::ThreadResumed)?;
+
+        let mut verified_goal = goal.clone();
+        if let Some(expected_goal) = &goal {
+            let actual_goal = recovery_client
+                .read_goal(&thread_id)
+                .context("Could not read the resumed Codex Goal")?;
+            let Some(mut actual_goal) = actual_goal else {
+                self.mark_resume_attention(
+                    &job_id,
+                    "Resume could not be verified: the Codex Goal was not returned.".into(),
+                    app,
+                )?;
+                return Ok(true);
+            };
+            if actual_goal.objective != expected_goal.objective
+                || actual_goal.token_budget != expected_goal.token_budget
+            {
+                self.mark_resume_attention(
+                    &job_id,
+                    "Resume could not be verified: the resumed Goal did not match the original objective.".into(),
+                    app,
+                )?;
+                return Ok(true);
+            }
+            if actual_goal.status == "usageLimited" {
+                actual_goal.status = "active".into();
+                recovery_client.set_goal(&thread_id, &actual_goal)?;
+            }
+            let final_goal = recovery_client
+                .read_goal(&thread_id)
+                .context("Could not verify the resumed Codex Goal")?
+                .context("Codex Goal disappeared during recovery")?;
+            if final_goal.objective != expected_goal.objective
+                || final_goal.token_budget != expected_goal.token_budget
+                || (expected_goal.status != "usageLimited"
+                    && final_goal.status != expected_goal.status)
+            {
+                self.mark_resume_attention(
+                    &job_id,
+                    "Resume could not be verified: the resumed Goal did not match the original state.".into(),
+                    app,
+                )?;
+                return Ok(true);
+            }
+            verified_goal = Some(final_goal);
+        }
+        self.update_resume_job(&job_id, |job| {
+            job.goal_snapshot = verified_goal.clone();
+            job.status = ResumeJobStatus::GoalVerified;
+        })?;
+
+        // Reconcile once more after resume. A previous crash may already have accepted the exact
+        // marker; in that case reading it is the idempotent success path and no new turn is sent.
+        let after_resume = recovery_client.read_thread(&thread_id)?;
+        let marker = crate::handoff::marker(&recovery_id, attempt);
+        if after_resume.contains_marker(&marker) {
+            let ack_at = now();
+            self.update_resume_job(&job_id, |job| {
+                job.status = ResumeJobStatus::Recovered;
+                job.last_ack_at = Some(ack_at.clone());
+                job.error = None;
+            })?;
+            self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::Monitoring)?;
+            self.emit_recovery_message(app, &format!("Task resumed with {}.", candidate.name));
+            if let Some(app) = app {
+                let _ = crate::tools::open_codex_thread_in_app(&thread_id);
+                let _ = app.emit("snapshot-changed", self.snapshot()?);
+            }
+            return Ok(true);
+        }
+
+        self.update_resume_job(&job_id, |job| {
+            job.status = ResumeJobStatus::TurnStarting;
+            job.recovery_marker = Some(marker.clone());
+        })?;
+        let prompt = crate::handoff::recovery_prompt(&recovery_id, attempt, &manifest_path);
+        let client_message_id = format!("{recovery_id}:attempt-{attempt}");
+        let ack = match recovery_client.start_turn_and_wait_ack(
+            &thread_id,
+            &prompt,
+            &runtime,
+            &client_message_id,
+        ) {
+            Ok(ack) => ack,
+            Err(error) => {
+                self.mark_resume_attention(
+                    &job_id,
+                    format!(
+                        "Resume could not be verified: {}.",
+                        crate::codex_app_server::redact_text(&error.to_string())
+                    ),
+                    app,
+                )?;
+                return Ok(true);
+            }
+        };
+        let ack_at = now();
+        self.update_resume_job(&job_id, |job| {
+            job.resumed_turn_id = Some(ack.turn_id.clone());
+            job.last_ack_at = Some(ack_at.clone());
+            job.status = ResumeJobStatus::TurnStarted;
+            job.error = None;
+        })?;
+        // The user-facing success claim is intentionally after the exact ACK and durable write.
+        self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::Recovered)?;
+        self.update_resume_job(&job_id, |job| job.status = ResumeJobStatus::Monitoring)?;
+        self.emit_recovery_message(app, &format!("Task resumed with {}.", candidate.name));
+        if let Some(app) = app {
+            let _ = crate::tools::open_codex_thread_in_app(&ack.thread_id);
+            let _ = app.emit("snapshot-changed", self.snapshot()?);
+        }
+        let _ = resumed;
+        Ok(true)
+    }
+
+    fn retry_same_account(
+        &self,
+        job_id: &str,
+        thread_id: &str,
+        runtime: &RecoveryRuntimeSnapshot,
+        goal: Option<&GoalSnapshot>,
+        manifest_path: &std::path::Path,
+        recovery_id: &str,
+        attempt: u32,
+        account_name: &str,
+        binary: &std::path::Path,
+        default_dir: &std::path::Path,
+        cwd: &str,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        self.update_resume_job(job_id, |job| job.status = ResumeJobStatus::ThreadResuming)?;
+        let config = AppServerConfig::new(
+            binary.to_path_buf(),
+            default_dir.to_path_buf(),
+            std::path::PathBuf::from(cwd),
+        );
+        let mut client = CodexAppServerClient::connect(&config)?;
+        let _resumed = client.resume_thread(thread_id, runtime)?;
+        self.update_resume_job(job_id, |job| job.status = ResumeJobStatus::ThreadResumed)?;
+
+        let mut verified_goal = goal.cloned();
+        if let Some(expected_goal) = goal {
+            let mut actual_goal = client
+                .read_goal(thread_id)?
+                .context("the retried Codex Goal was not returned")?;
+            if actual_goal.objective != expected_goal.objective
+                || actual_goal.token_budget != expected_goal.token_budget
+            {
+                anyhow::bail!("the retried Codex Goal did not match the original objective");
+            }
+            if actual_goal.status == "usageLimited" {
+                actual_goal.status = "active".into();
+                client.set_goal(thread_id, &actual_goal)?;
+            }
+            let final_goal = client
+                .read_goal(thread_id)?
+                .context("The retried Codex Goal disappeared during recovery")?;
+            if final_goal.objective != expected_goal.objective
+                || final_goal.token_budget != expected_goal.token_budget
+                || (expected_goal.status != "usageLimited"
+                    && final_goal.status != expected_goal.status)
+            {
+                anyhow::bail!("the retried Codex Goal did not match the original state");
+            }
+            verified_goal = Some(final_goal);
+        }
+        self.update_resume_job(job_id, |job| {
+            job.goal_snapshot = verified_goal.clone();
+            job.status = ResumeJobStatus::GoalVerified;
+        })?;
+
+        let marker = crate::handoff::marker(recovery_id, attempt);
+        if client.read_thread(thread_id)?.contains_marker(&marker) {
+            self.update_resume_job(job_id, |job| {
+                job.status = ResumeJobStatus::Recovered;
+                job.last_ack_at = Some(now());
+                job.error = None;
+            })?;
+            self.update_resume_job(job_id, |job| job.status = ResumeJobStatus::Monitoring)?;
+            self.emit_recovery_message(app, &format!("Task resumed with {account_name}."));
+            if app.is_some() {
+                let _ = crate::tools::open_codex_thread_in_app(thread_id);
+            }
+            return Ok(());
+        }
+
+        self.update_resume_job(job_id, |job| {
+            job.status = ResumeJobStatus::TurnStarting;
+            job.recovery_marker = Some(marker);
+        })?;
+        let prompt = crate::handoff::recovery_prompt(recovery_id, attempt, manifest_path);
+        let client_message_id = format!("{recovery_id}:attempt-{attempt}");
+        let ack =
+            client.start_turn_and_wait_ack(thread_id, &prompt, runtime, &client_message_id)?;
+        self.update_resume_job(job_id, |job| {
+            job.resumed_turn_id = Some(ack.turn_id);
+            job.last_ack_at = Some(now());
+            job.status = ResumeJobStatus::TurnStarted;
+            job.error = None;
+        })?;
+        self.update_resume_job(job_id, |job| job.status = ResumeJobStatus::Recovered)?;
+        self.update_resume_job(job_id, |job| job.status = ResumeJobStatus::Monitoring)?;
+        self.emit_recovery_message(app, &format!("Task resumed with {account_name}."));
+        if app.is_some() {
+            let _ = crate::tools::open_codex_thread_in_app(thread_id);
+        }
+        Ok(())
+    }
+
+    fn persist_waiting_resume_job(
+        &self,
+        thread_id: &str,
+        from_account_id: &str,
+        cwd: &str,
+        rollout: &std::path::Path,
+    ) -> Result<String> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        if let Some(job) = data.resume_jobs.iter_mut().find(|job| {
+            job.thread_id == thread_id && job.status == ResumeJobStatus::AwaitingTerminal
+        }) {
+            job.updated_at = now();
+            job.rollout_path = rollout.to_string_lossy().to_string();
+            job.rollout_offset = std::fs::metadata(rollout)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let id = job.id.clone();
+            self.store.save(&data)?;
+            return Ok(id);
+        }
+        let timestamp = now();
+        let id = Uuid::new_v4().to_string();
+        let recovery_id = Uuid::new_v4().to_string();
+        data.resume_jobs.push(ResumeJob {
+            id: id.clone(),
+            schema_version: 3,
+            recovery_id,
+            session_id: thread_id.into(),
+            thread_id: thread_id.into(),
+            failed_turn_id: String::new(),
+            resumed_turn_id: None,
+            event_key: format!("awaiting-terminal:{thread_id}"),
+            cwd: cwd.into(),
+            from_account_id: from_account_id.into(),
+            to_account_id: None,
+            checkpoint_path: String::new(),
+            rollout_path: rollout.to_string_lossy().to_string(),
+            rollout_offset: std::fs::metadata(rollout)
+                .map(|meta| meta.len())
+                .unwrap_or(0),
+            terminal_error_kind: None,
+            terminal_error_fingerprint: None,
+            manifest_path: None,
+            recovery_marker: None,
+            model: None,
+            reasoning_effort: None,
+            personality: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            goal_snapshot: None,
+            attempt: 0,
+            status: ResumeJobStatus::AwaitingTerminal,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            last_ack_at: None,
+            error: None,
+        });
+        self.store.save(&data)?;
+        Ok(id)
+    }
+
+    fn update_resume_job<F>(&self, job_id: &str, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut ResumeJob),
+    {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let job = data
+            .resume_jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .context("Recovery job disappeared")?;
+        update(job);
+        job.updated_at = now();
+        self.store.save(&data)?;
+        Ok(())
+    }
+
+    fn mark_resume_attention(
+        &self,
+        job_id: &str,
+        message: String,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        self.update_resume_job(job_id, |job| {
+            job.status = ResumeJobStatus::NeedsAttention;
+            job.error = Some(crate::codex_app_server::redact_text(&message));
+        })?;
+        self.emit_recovery_message(app, &message);
+        Ok(())
+    }
+
+    fn schedule_capacity_retry(&self, job_id: &str, message: &str) -> Result<Option<u32>> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let job = data
+            .resume_jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .context("Recovery job disappeared")?;
+        if job.attempt >= 3 {
+            return Ok(None);
+        }
+        job.attempt += 1;
+        let next_attempt = job.attempt;
+        job.status = ResumeJobStatus::Retrying;
+        job.error = Some(message.to_string());
+        job.updated_at = now();
+        self.store.save(&data)?;
+        Ok(Some(next_attempt))
+    }
+
+    fn emit_recovery_message(&self, app: Option<&AppHandle>, message: &str) {
+        if let Some(app) = app {
+            let _ = app.emit("auto-switched", message.to_string());
+            if let Ok(snapshot) = self.snapshot() {
+                let _ = app.emit("snapshot-changed", snapshot);
+            }
+        }
+    }
+
+    fn commit_recovery_account_switch(&self, candidate: &Account) -> Result<()> {
+        if candidate.api_provider.is_some() || candidate.state == AccountState::NeedsLogin {
+            anyhow::bail!("candidate account is not an eligible subscription account");
+        }
+        let default_dir = {
             let data = self
                 .data
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            let default_dir = resolved_default_config_dir(&data, &ToolId::Codex);
+            resolved_default_config_dir(&data, &ToolId::Codex)
+        };
+        // This is the one credential copy in the transaction. It runs only after the isolated
+        // candidate App Server passed auth/quota/model/effort preflight.
+        sync_codex_ide_credentials(
+            &self.store,
+            &candidate.id,
+            candidate.is_default,
+            &default_dir,
+        )
+        .context("Failed to switch the Codex recovery credential")?;
+        restart_codex_runtime_after_switch();
+        if candidate.is_default {
+            clear_active_profile(&ToolId::Codex, &self.store)?;
+        } else {
+            write_active_profile(&ToolId::Codex, &self.store, &candidate.id)?;
+        }
+        install_shell_hook(&self.store)?;
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let timestamp = now();
+        normalize_account_states(&mut data.accounts, &ToolId::Codex, Some(&candidate.id));
+        if let Some(account) = data
+            .accounts
+            .iter_mut()
+            .find(|account| account.tool_id == ToolId::Codex && account.id == candidate.id)
+        {
+            account.state = AccountState::Active;
+            account.last_used_at = Some(timestamp.clone());
+            account.updated_at = timestamp;
+        }
+        self.store.save(&data)?;
+        Ok(())
+    }
+
+    /// Startup healing never invents a new turn. It only reads the exact thread and durable
+    /// marker, then marks an ambiguous pre-ACK job for explicit attention. This is the crash-safe
+    /// boundary: a process restart cannot duplicate a logical recovery turn.
+    pub fn heal_resume_jobs(&self, app: Option<&AppHandle>) -> Result<()> {
+        let (binary, default_dir, jobs) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
             (
-                account_config_dir_with_default(&self.store, &candidate, &default_dir),
                 configured_binary_path(&data, &ToolId::Codex),
+                resolved_default_config_dir(&data, &ToolId::Codex),
+                data.resume_jobs.clone(),
             )
         };
         let Some(binary) = binary else {
-            return failure("Codex CLI is not configured".into());
+            return Ok(());
         };
-        let prompt = crate::handoff::continuation_prompt(&checkpoint_path);
-        if let Err(error) = crate::seamless::spawn_exact_resume(
-            &binary,
-            &config_dir,
-            std::path::Path::new(&checkpoint.cwd),
-            &checkpoint.session_id,
-            &prompt,
-        ) {
-            return failure(error);
+        let mut changed = false;
+        for job in jobs.into_iter().filter(|job| !job.status.is_terminal()) {
+            if job.status == ResumeJobStatus::Retrying {
+                self.update_resume_job(&job.id, |item| {
+                    item.status = ResumeJobStatus::NeedsAttention;
+                    item.error = Some(
+                        "Recovery retry was interrupted; inspect the thread before retrying."
+                            .into(),
+                    );
+                })?;
+                changed = true;
+                continue;
+            }
+            if matches!(job.status, ResumeJobStatus::AwaitingTerminal) {
+                continue;
+            }
+            if matches!(
+                job.status,
+                ResumeJobStatus::Checkpointed
+                    | ResumeJobStatus::CandidateVerified
+                    | ResumeJobStatus::Switching
+                    | ResumeJobStatus::ThreadResuming
+                    | ResumeJobStatus::ThreadResumed
+                    | ResumeJobStatus::GoalVerified
+            ) {
+                self.update_resume_job(&job.id, |item| {
+                    item.status = ResumeJobStatus::NeedsAttention;
+                    item.error = Some(
+                        "Recovery stopped before an exact turn/started ACK; inspect the thread before retrying.".into(),
+                    );
+                })?;
+                changed = true;
+                continue;
+            }
+            if !matches!(
+                job.status,
+                ResumeJobStatus::TurnStarting
+                    | ResumeJobStatus::TurnStarted
+                    | ResumeJobStatus::Recovered
+                    | ResumeJobStatus::Monitoring
+            ) {
+                continue;
+            }
+            let config = AppServerConfig::new(
+                binary.clone(),
+                default_dir.clone(),
+                std::path::PathBuf::from(&job.cwd),
+            );
+            let Ok(mut client) = CodexAppServerClient::connect(&config) else {
+                self.update_resume_job(&job.id, |item| {
+                    item.status = ResumeJobStatus::NeedsAttention;
+                    item.error = Some("Resume could not be verified after restart.".into());
+                })?;
+                changed = true;
+                continue;
+            };
+            let Ok(thread) = client.read_thread(&job.thread_id) else {
+                self.update_resume_job(&job.id, |item| {
+                    item.status = ResumeJobStatus::NeedsAttention;
+                    item.error = Some("Resume could not be verified after restart.".into());
+                })?;
+                changed = true;
+                continue;
+            };
+            let marker_seen = job
+                .recovery_marker
+                .as_deref()
+                .is_some_and(|marker| thread.contains_marker(marker));
+            let turn_seen = job
+                .resumed_turn_id
+                .as_deref()
+                .and_then(|turn_id| thread.turn(turn_id))
+                .is_some();
+            if !marker_seen && !turn_seen {
+                self.update_resume_job(&job.id, |item| {
+                    item.status = ResumeJobStatus::NeedsAttention;
+                    item.error = Some("Resume could not be verified after restart.".into());
+                })?;
+                changed = true;
+                continue;
+            }
+            let completed = job
+                .resumed_turn_id
+                .as_deref()
+                .and_then(|turn_id| thread.turn(turn_id))
+                .is_some_and(|turn| turn.status.eq_ignore_ascii_case("completed"));
+            self.update_resume_job(&job.id, |item| {
+                item.status = if completed {
+                    ResumeJobStatus::Completed
+                } else {
+                    ResumeJobStatus::Recovered
+                };
+                if item.last_ack_at.is_none() {
+                    item.last_ack_at = Some(now());
+                }
+                item.error = None;
+            })?;
+            if !completed {
+                self.update_resume_job(&job.id, |item| item.status = ResumeJobStatus::Monitoring)?;
+            }
+            changed = true;
         }
-        {
+        if changed {
+            if let Some(app) = app {
+                let _ = app.emit("snapshot-changed", self.snapshot()?);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn retry_resume_job(&self, app: &AppHandle, job_id: &str) -> Result<AppSnapshot> {
+        let rollout = {
             let mut data = self
                 .data
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            if let Some(job) = data
+            let job = data
                 .resume_jobs
                 .iter_mut()
-                .rev()
-                .find(|j| j.session_id == checkpoint.session_id && j.event_key == event_key)
-            {
-                job.status = ResumeJobStatus::Resumed;
-                job.updated_at = now();
-                job.error = None;
+                .find(|job| job.id == job_id)
+                .context("Recovery job not found")?;
+            if !matches!(
+                job.status,
+                ResumeJobStatus::NeedsAttention | ResumeJobStatus::Failed
+            ) {
+                anyhow::bail!("Recovery job is not waiting for a retry");
             }
-            self.store.save(&data)?;
+            job.attempt = job.attempt.saturating_add(1).max(1);
+            job.recovery_marker = Some(crate::handoff::marker(&job.recovery_id, job.attempt));
+            job.status = ResumeJobStatus::Retrying;
+            job.error = None;
+            job.rollout_path.clone()
+        };
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?
+            .clone();
+        self.store.save(&data)?;
+        if rollout.is_empty() {
+            self.mark_resume_attention(
+                job_id,
+                "Resume could not be verified: the original rollout is unavailable.".into(),
+                Some(app),
+            )?;
+            return self.snapshot();
         }
-        if let Some(app) = app {
-            let _ = app.emit(
-                "auto-switched",
-                format!(
-                    "Resumed Codex session {} with {}.",
-                    checkpoint.session_id, candidate.name
-                ),
-            );
+        if let Ok(mut active) = self.codex_active_rollout.lock() {
+            *active = Some(std::path::PathBuf::from(rollout));
         }
-        Ok(true)
+        let _ = self.try_seamless_codex_handoff(
+            crate::seamless::DEFAULT_HANDOFF_THRESHOLD,
+            true,
+            Some(app),
+        );
+        self.snapshot()
+    }
+
+    pub fn cancel_resume_job(&self, job_id: &str) -> Result<AppSnapshot> {
+        self.update_resume_job(job_id, |job| {
+            if !job.status.is_terminal() {
+                job.status = ResumeJobStatus::Cancelled;
+                job.error = Some("Cancelled by the user".into());
+            }
+        })?;
+        self.snapshot()
+    }
+
+    pub fn open_resume_job(&self, job_id: &str) -> Result<AppSnapshot> {
+        let thread_id = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let job = data
+                .resume_jobs
+                .iter()
+                .find(|job| job.id == job_id)
+                .context("Recovery job not found")?;
+            if !job.status.is_acknowledged() {
+                anyhow::bail!("The Codex thread is not acknowledged yet");
+            }
+            job.thread_id.clone()
+        };
+        crate::tools::open_codex_thread_in_app(&thread_id)?;
+        self.snapshot()
     }
 
     /// Called by the background poll: if the account has finished logging in (the token exists) →
@@ -2663,7 +3450,7 @@ fn migrate_auto_switch_settings(data: &mut StoredState) {
 fn retire_auto_ping_settings(data: &mut StoredState) {
     data.auto_ping_enabled = false;
     data.auto_ping.clear();
-    data.schema_version = data.schema_version.max(2);
+    data.schema_version = data.schema_version.max(3);
 }
 
 fn natural_name_cmp(left: &str, right: &str) -> Ordering {
@@ -3400,6 +4187,52 @@ fn notify_exhausted(app: &AppHandle, account: &Account) {
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+fn is_same_account_retryable(kind: RecoveryErrorKind) -> bool {
+    matches!(
+        kind,
+        RecoveryErrorKind::ServerOverloaded
+            | RecoveryErrorKind::ResponseStreamDisconnected
+            | RecoveryErrorKind::ResponseStreamConnectionFailed
+            | RecoveryErrorKind::HttpConnectionFailed
+    )
+}
+
+fn recovery_retry_delay(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(2).min(3);
+    std::time::Duration::from_secs(1_u64 << exponent)
+}
+
+fn recovery_attention_message(kind: RecoveryErrorKind) -> String {
+    match kind {
+        RecoveryErrorKind::ServerOverloaded => {
+            "The selected model is temporarily at capacity. Retrying without switching accounts…".into()
+        }
+        RecoveryErrorKind::Unauthorized => {
+            "Resume could not be verified: Codex authentication expired.".into()
+        }
+        RecoveryErrorKind::ContextWindowExceeded => {
+            "Resume could not be verified: the thread context is exhausted; compact the same thread before retrying.".into()
+        }
+        RecoveryErrorKind::SandboxError => {
+            "Resume could not be verified: the original sandbox or approval policy was rejected.".into()
+        }
+        RecoveryErrorKind::UserCancelled => {
+            "Resume could not be verified: the interrupted Codex turn was cancelled by the user.".into()
+        }
+        RecoveryErrorKind::ResponseStreamDisconnected
+        | RecoveryErrorKind::ResponseStreamConnectionFailed
+        | RecoveryErrorKind::HttpConnectionFailed => {
+            "Resume could not be verified: the Codex response stream ended before recovery could be acknowledged.".into()
+        }
+        RecoveryErrorKind::Unknown => {
+            "Resume could not be verified: no structured Codex terminal failure was available.".into()
+        }
+        RecoveryErrorKind::UsageLimitExceeded => {
+            "Resume could not be verified: the usage-limit recovery path was not accepted.".into()
+        }
+    }
 }
 
 /// Render an ISO 8601 instant as a human-friendly LOCAL time with an explicit UTC-offset label,

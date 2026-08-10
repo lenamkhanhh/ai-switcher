@@ -2146,6 +2146,37 @@ button.danger:hover:not(:disabled) {
   flex: 1;
 }
 
+.recoveryBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 16px 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 76%, transparent);
+  font-size: 13px;
+}
+.recoveryBanner.attention {
+  border-color: var(--danger, #d66);
+  background: color-mix(in srgb, var(--danger, #d66) 12%, transparent);
+}
+.recoveryBanner > svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: var(--accent);
+}
+.recoveryBannerText {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.recoveryBannerText span {
+  color: var(--text-2);
+}
+
 /* Help icon → tooltip (thay help-text) */
 .helpDot {
   display: inline-grid;

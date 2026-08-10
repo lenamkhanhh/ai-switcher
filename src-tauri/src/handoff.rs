@@ -1,9 +1,16 @@
+use crate::codex_app_server::ThreadSnapshot;
+use crate::models::{
+    GoalSnapshot, RecoveryErrorKind, RecoveryItemSummary, RecoveryPlanStep,
+    RecoveryRuntimeSnapshot, RecoveryWorkspaceSnapshot,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 const MAX_RECENT_MESSAGES: usize = 12;
 const MAX_MESSAGE_CHARS: usize = 1800;
@@ -101,6 +108,14 @@ pub fn checkpoint_from_rollout(
     Ok(Some((checkpoint, path)))
 }
 
+/// Read only the bounded rollout identity needed to bind a watcher observation to an App Server
+/// thread. The transactional path uses this helper instead of writing the legacy transcript-style
+/// checkpoint before it has reached a terminal turn.
+pub fn thread_id_from_rollout(file: &Path) -> Result<Option<String>> {
+    let lines = read_lines(file)?;
+    Ok(parse_handoff_context(&lines).session_id)
+}
+
 fn last_event_timestamp(lines: &[String]) -> Option<String> {
     lines
         .iter()
@@ -117,6 +132,265 @@ fn last_event_timestamp(lines: &[String]) -> Option<String> {
 
 pub fn continuation_prompt(checkpoint_path: &Path) -> String {
     format!("Continue the interrupted task using the existing session context and checkpoint. Do not scan the full repository. Inspect only files needed for the next incomplete step. Verify existing edits before changing more. Checkpoint: {}", checkpoint_path.display())
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryManifestFailure {
+    pub kind: RecoveryErrorKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryChild {
+    pub id: String,
+    pub status: String,
+    pub owner: String,
+}
+
+/// Bounded, auditable state copied before a credential switch. It intentionally contains no raw
+/// transcript, token, header, credential, or unbounded tool output.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryManifest {
+    pub schema_version: u32,
+    pub recovery_id: String,
+    pub thread_id: String,
+    pub failed_turn_id: String,
+    pub failure: RecoveryManifestFailure,
+    pub goal: GoalSnapshot,
+    pub runtime: RecoveryRuntimeSnapshot,
+    pub plan: Vec<RecoveryPlanStep>,
+    pub confirmed_completed_items: Vec<RecoveryItemSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncertain_item: Option<RecoveryItemSummary>,
+    pub workspace: RecoveryWorkspaceSnapshot,
+    pub children: Vec<RecoveryChild>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ItemReconciliation {
+    CompletedNeverReplay,
+    FailedReconcileFailure,
+    StartedInspectBeforeContinuing,
+    FileChangePreserveAndVerify,
+}
+
+/// Reconciliation is intentionally conservative: a completed item is never replayed, while an
+/// item without a completion event must be inspected against the workspace before continuation.
+pub fn reconcile_item(item: &RecoveryItemSummary) -> ItemReconciliation {
+    let kind = item.kind.to_ascii_lowercase();
+    let status = item.status.to_ascii_lowercase();
+    if status == "completed" || status == "success" {
+        return ItemReconciliation::CompletedNeverReplay;
+    }
+    if status == "failed" || status == "error" {
+        return ItemReconciliation::FailedReconcileFailure;
+    }
+    if kind.contains("file") || kind.contains("patch") || kind.contains("command") {
+        return ItemReconciliation::FileChangePreserveAndVerify;
+    }
+    ItemReconciliation::StartedInspectBeforeContinuing
+}
+
+pub fn recovery_prompt(recovery_id: &str, attempt: u32, checkpoint_path: &Path) -> String {
+    format!(
+        "[AISW_RECOVERY:{recovery_id}:attempt-{attempt}]\n\nContinue the existing interrupted Goal from its durable state.\nDo not repeat confirmed completed items.\nFirst reconcile the uncertain item against the current workspace, if one exists.\nThen continue the first incomplete plan step.\nKeep the original objective, constraints, permissions, and verification requirements.\nRecovery manifest: {}",
+        checkpoint_path.display()
+    )
+}
+
+pub fn marker(recovery_id: &str, attempt: u32) -> String {
+    format!("[AISW_RECOVERY:{recovery_id}:attempt-{attempt}]")
+}
+
+pub fn plan_from_thread(snapshot: &ThreadSnapshot) -> Vec<RecoveryPlanStep> {
+    let mut steps = Vec::new();
+    for turn in &snapshot.turns {
+        for item in &turn.items {
+            let kind = item
+                .get("type")
+                .or_else(|| item.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !kind.to_ascii_lowercase().contains("plan") {
+                continue;
+            }
+            let Some(plan) = item.get("plan").and_then(Value::as_array) else {
+                continue;
+            };
+            for (index, raw_step) in plan.iter().enumerate() {
+                let description = raw_step
+                    .get("step")
+                    .or_else(|| raw_step.get("description"))
+                    .and_then(Value::as_str)
+                    .map(crate::codex_app_server::redact_text)
+                    .unwrap_or_else(|| "Unnamed plan step".into());
+                let status = raw_step
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("incomplete")
+                    .to_string();
+                steps.push(RecoveryPlanStep {
+                    id: raw_step
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("plan-step-{index}")),
+                    description,
+                    status,
+                });
+            }
+        }
+    }
+    steps
+}
+
+pub fn manifest_from_thread(
+    recovery_id: &str,
+    failed_turn_id: &str,
+    failure_kind: RecoveryErrorKind,
+    failure_message: Option<&str>,
+    snapshot: &ThreadSnapshot,
+    goal: GoalSnapshot,
+    plan: Vec<RecoveryPlanStep>,
+    workspace: RecoveryWorkspaceSnapshot,
+    children: Vec<RecoveryChild>,
+) -> RecoveryManifest {
+    let turn = snapshot
+        .turn(failed_turn_id)
+        .or_else(|| snapshot.terminal_turn());
+    let mut confirmed_completed_items = Vec::new();
+    let mut uncertain_item = None;
+    if let Some(turn) = turn {
+        for raw in &turn.items {
+            let item = item_summary(raw);
+            match reconcile_item(&item) {
+                ItemReconciliation::CompletedNeverReplay => {
+                    confirmed_completed_items.push(item);
+                }
+                ItemReconciliation::FailedReconcileFailure
+                | ItemReconciliation::StartedInspectBeforeContinuing
+                | ItemReconciliation::FileChangePreserveAndVerify
+                    if uncertain_item.is_none() =>
+                {
+                    uncertain_item = Some(item);
+                }
+                _ => {}
+            }
+        }
+    }
+    RecoveryManifest {
+        schema_version: 1,
+        recovery_id: recovery_id.to_string(),
+        thread_id: snapshot.thread_id.clone(),
+        failed_turn_id: failed_turn_id.to_string(),
+        failure: RecoveryManifestFailure {
+            kind: failure_kind,
+            message: failure_message.map(crate::codex_app_server::redact_text),
+        },
+        goal,
+        runtime: snapshot.runtime.clone(),
+        plan,
+        confirmed_completed_items,
+        uncertain_item,
+        workspace,
+        children,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+pub fn write_manifest_atomic(handoff_dir: &Path, manifest: &RecoveryManifest) -> Result<PathBuf> {
+    std::fs::create_dir_all(handoff_dir)?;
+    let _ = crate::store::set_recovery_manifest_directory_permissions(handoff_dir);
+    let path = handoff_dir.join(format!("recovery-{}.json", manifest.recovery_id));
+    let temp = handoff_dir.join(format!(".recovery-{}.tmp", manifest.recovery_id));
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    let mut file = std::fs::File::create(&temp)?;
+    use std::io::Write;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temp, &path)?;
+    let _ = crate::store::set_recovery_manifest_permissions(&path);
+    Ok(path)
+}
+
+/// Capture only a bounded status summary and a deterministic hash of the current diff. The diff
+/// itself is never written to the manifest, so the checkpoint remains small and cannot become a
+/// credential/transcript dump.
+pub fn workspace_snapshot(cwd: &Path) -> RecoveryWorkspaceSnapshot {
+    let status = git_output(cwd, &["status", "--short"], 64 * 1024);
+    let diff = git_output_bytes(cwd, &["diff", "--binary", "--"], 2 * 1024 * 1024);
+    let diff_sha256 = format!("{:x}", Sha256::digest(&diff));
+    let changed_paths = status
+        .lines()
+        .filter_map(|line| {
+            let path = line.get(3..)?.trim();
+            if path.is_empty() || path.contains('\0') {
+                None
+            } else {
+                Some(crate::codex_app_server::redact_text(path))
+            }
+        })
+        .take(256)
+        .collect();
+    RecoveryWorkspaceSnapshot {
+        diff_sha256,
+        changed_paths,
+        git_status_summary: crate::codex_app_server::redact_text(&status),
+    }
+}
+
+fn item_summary(value: &Value) -> RecoveryItemSummary {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-item")
+        .to_string();
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("item")
+        .to_string();
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("started")
+        .to_string();
+    RecoveryItemSummary {
+        id,
+        kind,
+        status,
+        // Keep only short human-readable labels; raw command/output content is intentionally not
+        // copied into the durable recovery file.
+        summary: value
+            .get("name")
+            .or_else(|| value.get("title"))
+            .and_then(Value::as_str)
+            .map(crate::codex_app_server::redact_text),
+    }
+}
+
+fn git_output(cwd: &Path, args: &[&str], max_bytes: usize) -> String {
+    String::from_utf8_lossy(&git_output_bytes(cwd, args, max_bytes)).to_string()
+}
+
+fn git_output_bytes(cwd: &Path, args: &[&str], max_bytes: usize) -> Vec<u8> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    crate::tools::hide_command_window(&mut command);
+    command
+        .output()
+        .map(|output| output.stdout.into_iter().take(max_bytes).collect())
+        .unwrap_or_default()
 }
 
 fn rollout_is_idle(lines: &[String]) -> bool {
@@ -503,5 +777,86 @@ mod tests {
         assert!(!prompt.contains("access_token=abc"));
         assert!(!prompt.contains("sk-proj-secret"));
         assert!(prompt.contains("[redacted]"));
+    }
+
+    #[test]
+    fn recovery_prompt_has_exact_marker_and_durable_manifest_path() {
+        let prompt = recovery_prompt("recovery-1", 2, Path::new("D:\\state\\recovery.json"));
+        assert!(prompt.starts_with("[AISW_RECOVERY:recovery-1:attempt-2]"));
+        assert!(prompt.contains("Do not repeat confirmed completed items."));
+        assert!(prompt.contains("Recovery manifest: D:\\state\\recovery.json"));
+    }
+
+    #[test]
+    fn reconciliation_never_replays_completed_items() {
+        assert_eq!(
+            reconcile_item(&RecoveryItemSummary {
+                id: "item-1".into(),
+                kind: "assistantMessage".into(),
+                status: "completed".into(),
+                summary: None,
+            }),
+            ItemReconciliation::CompletedNeverReplay
+        );
+        assert_eq!(
+            reconcile_item(&RecoveryItemSummary {
+                id: "item-2".into(),
+                kind: "assistantMessage".into(),
+                status: "started".into(),
+                summary: None,
+            }),
+            ItemReconciliation::StartedInspectBeforeContinuing
+        );
+        assert_eq!(
+            reconcile_item(&RecoveryItemSummary {
+                id: "item-3".into(),
+                kind: "commandExecution".into(),
+                status: "started".into(),
+                summary: None,
+            }),
+            ItemReconciliation::FileChangePreserveAndVerify
+        );
+    }
+
+    #[test]
+    fn manifest_serialization_is_bounded_and_redacted() {
+        let snapshot = ThreadSnapshot::from_response(
+            serde_json::json!({
+                "thread": {
+                    "id": "thread-1",
+                    "turns": [{
+                        "id": "turn-1",
+                        "status": "failed",
+                        "items": [
+                            {"id":"done","type":"assistantMessage","status":"completed"},
+                            {"id":"uncertain","type":"commandExecution","status":"started","command":"sk-proj-secret"}
+                        ]
+                    }]
+                },
+                "cwd": "D:\\repo"
+            }),
+            "thread-1",
+        )
+        .unwrap();
+        let manifest = manifest_from_thread(
+            "recovery-1",
+            "turn-1",
+            RecoveryErrorKind::UsageLimitExceeded,
+            Some("Authorization: Bearer secret"),
+            &snapshot,
+            GoalSnapshot {
+                objective: "ship feature".into(),
+                status: "active".into(),
+                token_budget: Some(100),
+            },
+            vec![],
+            RecoveryWorkspaceSnapshot::default(),
+            vec![],
+        );
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        assert!(serialized.contains("done"));
+        assert!(serialized.contains("uncertain"));
+        assert!(!serialized.contains("sk-proj-secret"));
+        assert!(!serialized.contains("Bearer secret"));
     }
 }

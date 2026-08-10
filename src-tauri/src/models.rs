@@ -44,7 +44,6 @@ impl ToolId {
             ToolId::Antigravity => "Antigravity IDE",
         }
     }
-
 }
 
 /// Metadata exposed for the encrypted credential vault. Secret values never appear in this type.
@@ -506,28 +505,198 @@ pub struct AppSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ResumeJobStatus {
+    /// Legacy status retained so state files written by the previous handoff implementation
+    /// remain readable. New recovery jobs use the explicit transactional states below.
     Queued,
+    Detected,
+    AwaitingTerminal,
+    Checkpointing,
     Checkpointed,
+    CandidateVerified,
     Switching,
+    ThreadResuming,
+    ThreadResumed,
+    GoalVerified,
+    TurnStarting,
+    TurnStarted,
+    Recovered,
+    Monitoring,
+    Completed,
+    Retrying,
+    NeedsAttention,
     Resumed,
     Failed,
     Cancelled,
+}
+
+impl ResumeJobStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    pub fn is_acknowledged(&self) -> bool {
+        matches!(
+            self,
+            Self::TurnStarted
+                | Self::Recovered
+                | Self::Monitoring
+                | Self::Completed
+                | Self::Resumed
+        )
+    }
+}
+
+/// Structured failure categories returned by the Codex App Server. Only
+/// `usageLimitExceeded` permits automatic account rotation.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryErrorKind {
+    UsageLimitExceeded,
+    ServerOverloaded,
+    ResponseStreamDisconnected,
+    ResponseStreamConnectionFailed,
+    HttpConnectionFailed,
+    Unauthorized,
+    ContextWindowExceeded,
+    SandboxError,
+    UserCancelled,
+    Unknown,
+}
+
+impl RecoveryErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UsageLimitExceeded => "usageLimitExceeded",
+            Self::ServerOverloaded => "serverOverloaded",
+            Self::ResponseStreamDisconnected => "responseStreamDisconnected",
+            Self::ResponseStreamConnectionFailed => "responseStreamConnectionFailed",
+            Self::HttpConnectionFailed => "httpConnectionFailed",
+            Self::Unauthorized => "unauthorized",
+            Self::ContextWindowExceeded => "contextWindowExceeded",
+            Self::SandboxError => "sandboxError",
+            Self::UserCancelled => "userCancelled",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalSnapshot {
+    #[serde(default)]
+    pub objective: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryPlanStep {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryItemSummary {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryWorkspaceSnapshot {
+    #[serde(default)]
+    pub diff_sha256: String,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    #[serde(default)]
+    pub git_status_summary: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRuntimeSnapshot {
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeJob {
     pub id: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub recovery_id: String,
     pub session_id: String,
+    #[serde(default)]
+    pub thread_id: String,
+    #[serde(default)]
+    pub failed_turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_turn_id: Option<String>,
     pub event_key: String,
     pub cwd: String,
     pub from_account_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_account_id: Option<String>,
     pub checkpoint_path: String,
+    #[serde(default)]
+    pub rollout_path: String,
+    #[serde(default)]
+    pub rollout_offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error_kind: Option<RecoveryErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_snapshot: Option<GoalSnapshot>,
+    #[serde(default)]
+    pub attempt: u32,
     pub status: ResumeJobStatus,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ack_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -563,7 +732,6 @@ impl Default for AutoPingSetting {
         }
     }
 }
-
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

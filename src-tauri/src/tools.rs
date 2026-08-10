@@ -563,53 +563,64 @@ pub fn refresh_codex_frontends_after_switch() {
     }
 }
 
-/// Give the interactive `codex resume` TUI a moment to load, then request the same session in
-/// the Codex desktop app. This is deliberately best-effort: if the desktop app is unavailable,
-/// the visible terminal remains the fallback surface instead of losing the resumed task.
-pub fn open_codex_session_in_app_after_resume(pid: u32) {
+/// Validate and open the Codex desktop deep link directly. Recovery calls this only after an
+/// exact `turn/started` ACK; it never focuses a window or sends keyboard input.
+pub fn open_codex_thread_in_app(thread_id: &str) -> Result<()> {
+    if !is_safe_codex_thread_id(thread_id) {
+        anyhow::bail!("Codex thread id contains unsafe characters");
+    }
+    let url = format!("codex://threads/{thread_id}");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let script = format!(
-            r#"
-$ErrorActionPreference = 'SilentlyContinue'
-Start-Sleep -Seconds 4
-Add-Type -AssemblyName Microsoft.VisualBasic
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -Namespace Aisw -Name Fg -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
-$p = Get-Process -Id {pid}
-if ($p -and $p.MainWindowHandle -ne 0) {{
-  [Microsoft.VisualBasic.Interaction]::AppActivate($p.Id) | Out-Null
-  Start-Sleep -Milliseconds 250
-  # Only type into the resume TUI if it actually became foreground; otherwise the keystrokes land
-  # in whatever window the user is currently focused on.
-  if ([Aisw.Fg]::GetForegroundWindow() -eq $p.MainWindowHandle) {{
-    [System.Windows.Forms.SendKeys]::SendWait('/app')
-    [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
-  }}
-}}
-"#
-        );
-        let _ = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &script,
-            ])
+        let status = Command::new("cmd.exe")
+            .args(["/C", "start", "", &url])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+            .status()
+            .context("Couldn't open the Codex thread deep link")?;
+        if !status.success() {
+            anyhow::bail!("Codex thread deep link was rejected");
+        }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = pid;
+        let status = Command::new("open")
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("Couldn't open the Codex thread deep link")?;
+        if !status.success() {
+            anyhow::bail!("Codex thread deep link was rejected");
+        }
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let status = Command::new("xdg-open")
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("Couldn't open the Codex thread deep link")?;
+        if !status.success() {
+            anyhow::bail!("Codex thread deep link was rejected");
+        }
+    }
+    Ok(())
+}
+
+pub fn is_safe_codex_thread_id(thread_id: &str) -> bool {
+    !thread_id.is_empty()
+        && thread_id.len() <= 160
+        && thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 #[cfg(test)]
@@ -838,6 +849,22 @@ mod codex_ide_credential_tests {
         assert!(!script.contains(
             "[System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')"
         ));
+    }
+}
+
+#[cfg(test)]
+mod recovery_deep_link_tests {
+    use super::*;
+
+    #[test]
+    fn deep_link_thread_ids_are_strictly_bounded() {
+        assert!(is_safe_codex_thread_id(
+            "019fa680-b039-7b81-8a46-fc4ef5dfde22"
+        ));
+        assert!(is_safe_codex_thread_id("thread_1"));
+        assert!(!is_safe_codex_thread_id("thread/../../state"));
+        assert!(!is_safe_codex_thread_id("thread with spaces"));
+        assert!(!is_safe_codex_thread_id("codex://threads/other"));
     }
 }
 

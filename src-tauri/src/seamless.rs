@@ -1,12 +1,6 @@
 use crate::models::{Account, AccountState, ResumeJob, ResumeJobStatus, ToolId};
-use std::path::Path;
-
 pub const DEFAULT_HANDOFF_THRESHOLD: f64 = 92.0;
 pub const CANDIDATE_LIMIT: f64 = 95.0;
-
-pub fn should_checkpoint(percent_used: Option<f64>, session_idle: bool) -> bool {
-    session_idle && percent_used.is_some_and(|value| value >= DEFAULT_HANDOFF_THRESHOLD)
-}
 
 pub fn should_start_handoff(
     percent_used: Option<f64>,
@@ -14,10 +8,6 @@ pub fn should_start_handoff(
     threshold: f64,
 ) -> bool {
     explicit_quota_error || percent_used.is_some_and(|value| value >= threshold)
-}
-
-pub fn resume_args<'a>(session_id: &'a str, prompt: &'a str) -> [&'a str; 3] {
-    ["resume", session_id, prompt]
 }
 
 /// Pick the Codex account to hand the session over to.
@@ -29,11 +19,11 @@ pub fn resume_args<'a>(session_id: &'a str, prompt: &'a str) -> [&'a str; 3] {
 /// the next poll — ping-ponging between two nearly-exhausted accounts, spawning a resume console
 /// each time. When the switch is forced by a real quota error the reported numbers can't be
 /// trusted, so no improvement is required.
-pub fn select_candidate<'a>(
+pub fn rank_candidates<'a>(
     accounts: &'a [Account],
     current_id: &str,
     must_improve_on: Option<f64>,
-) -> Option<&'a Account> {
+) -> Vec<&'a Account> {
     let mut eligible: Vec<&Account> = accounts
         .iter()
         .filter(|account| {
@@ -69,13 +59,22 @@ pub fn select_candidate<'a>(
             })
             .then_with(|| left.id.cmp(&right.id))
     });
-    eligible.into_iter().next()
+    eligible
 }
 
-pub fn is_duplicate(jobs: &[ResumeJob], session_id: &str, event_key: &str) -> bool {
+/// Durable dedupe key for the transactional path. The old `(session,event)` key remains for
+/// loading legacy state, but a retryable new recovery is bound to the exact failed turn and the
+/// structured failure fingerprint.
+pub fn is_recovery_duplicate(
+    jobs: &[ResumeJob],
+    thread_id: &str,
+    failed_turn_id: &str,
+    terminal_error_fingerprint: &str,
+) -> bool {
     jobs.iter().any(|job| {
-        job.session_id == session_id
-            && job.event_key == event_key
+        job.thread_id == thread_id
+            && job.failed_turn_id == failed_turn_id
+            && job.terminal_error_fingerprint.as_deref() == Some(terminal_error_fingerprint)
             && !matches!(
                 job.status,
                 ResumeJobStatus::Cancelled | ResumeJobStatus::Failed
@@ -83,62 +82,9 @@ pub fn is_duplicate(jobs: &[ResumeJob], session_id: &str, event_key: &str) -> bo
     })
 }
 
-pub fn spawn_exact_resume(
-    binary: &Path,
-    code_home: &Path,
-    cwd: &Path,
-    session_id: &str,
-    prompt: &str,
-) -> Result<u32, String> {
-    let mut command = std::process::Command::new(binary);
-    command
-        .args(resume_args(session_id, prompt))
-        .env("CODEX_HOME", code_home)
-        .current_dir(cwd)
-        // Keep the TUI attached to a real console on Windows. This is required for the
-        // follow-up `/app` command; a detached process can only prove that it started.
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
-    }
-    #[cfg(not(windows))]
-    crate::tools::hide_command_window(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("resume launch failed: {error}"))?;
-    let pid = child.id();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(status)) if !status.success() => {
-                return Err(format!(
-                    "resume exited immediately with {}",
-                    status.code().unwrap_or(-1)
-                ))
-            }
-            Ok(Some(_)) => return Ok(pid),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-            Err(error) => return Err(format!("resume health check failed: {error}")),
-        }
-    }
-    crate::tools::open_codex_session_in_app_after_resume(pid);
-    Ok(pid)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn threshold_requires_92_percent_and_idle() {
-        assert!(!should_checkpoint(Some(91.0), true));
-        assert!(should_checkpoint(Some(92.0), true));
-        assert!(!should_checkpoint(Some(92.0), false));
-    }
 
     #[test]
     fn unknown_window_only_handoffs_after_an_explicit_quota_error() {
@@ -148,12 +94,52 @@ mod tests {
     }
 
     #[test]
-    fn resume_is_exact_and_never_uses_last() {
-        assert_eq!(
-            resume_args("session-uuid", "checkpoint"),
-            ["resume", "session-uuid", "checkpoint"]
-        );
-        assert!(!resume_args("session-uuid", "checkpoint").contains(&"--last"));
+    fn recovery_dedupe_is_bound_to_thread_failed_turn_and_structured_fingerprint() {
+        let mut job = ResumeJob {
+            id: "job-1".into(),
+            schema_version: 3,
+            recovery_id: "recovery-1".into(),
+            session_id: "thread-1".into(),
+            thread_id: "thread-1".into(),
+            failed_turn_id: "turn-1".into(),
+            resumed_turn_id: None,
+            event_key: "legacy".into(),
+            cwd: "D:\\repo".into(),
+            from_account_id: "old".into(),
+            to_account_id: Some("new".into()),
+            checkpoint_path: "checkpoint".into(),
+            rollout_path: "rollout".into(),
+            rollout_offset: 12,
+            terminal_error_kind: Some(crate::models::RecoveryErrorKind::UsageLimitExceeded),
+            terminal_error_fingerprint: Some("fingerprint".into()),
+            manifest_path: Some("manifest".into()),
+            recovery_marker: Some("marker".into()),
+            model: Some("gpt-5".into()),
+            reasoning_effort: Some("high".into()),
+            personality: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            goal_snapshot: None,
+            attempt: 1,
+            status: ResumeJobStatus::Checkpointed,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_ack_at: None,
+            error: None,
+        };
+        assert!(is_recovery_duplicate(
+            &[job.clone()],
+            "thread-1",
+            "turn-1",
+            "fingerprint"
+        ));
+        job.failed_turn_id = "turn-2".into();
+        assert!(!is_recovery_duplicate(
+            &[job],
+            "thread-1",
+            "turn-1",
+            "fingerprint"
+        ));
     }
 
     fn codex_account(id: &str, five_hour: f64) -> Account {
@@ -201,13 +187,15 @@ mod tests {
         let accounts = vec![codex_account("current", 93.0), codex_account("worse", 94.0)];
 
         assert!(
-            select_candidate(&accounts, "current", Some(93.0)).is_none(),
+            rank_candidates(&accounts, "current", Some(93.0)).is_empty(),
             "an account with less headroom is not an improvement"
         );
 
         // A switch forced by a real quota error can't trust the numbers and takes what's there.
         assert_eq!(
-            select_candidate(&accounts, "current", None).map(|a| a.id.as_str()),
+            rank_candidates(&accounts, "current", None)
+                .first()
+                .map(|a| a.id.as_str()),
             Some("worse")
         );
 
@@ -216,7 +204,9 @@ mod tests {
             codex_account("better", 10.0),
         ];
         assert_eq!(
-            select_candidate(&accounts, "current", Some(93.0)).map(|a| a.id.as_str()),
+            rank_candidates(&accounts, "current", Some(93.0))
+                .first()
+                .map(|a| a.id.as_str()),
             Some("better")
         );
     }
@@ -258,7 +248,9 @@ mod tests {
             }),
         };
         assert_eq!(
-            select_candidate(&[account], "current", None).map(|a| a.id.as_str()),
+            rank_candidates(&[account], "current", None)
+                .first()
+                .map(|a| a.id.as_str()),
             Some("candidate")
         );
     }

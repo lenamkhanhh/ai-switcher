@@ -1,7 +1,8 @@
 mod api_gateway;
 mod app_state;
-mod codex_pet;
+mod codex_app_server;
 mod codex_import;
+mod codex_pet;
 mod detection;
 mod handoff;
 mod models;
@@ -19,10 +20,9 @@ use models::{
     AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, CreateApiGatewayKeyInput,
     CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
     DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput, RenameAccountInput,
-    SaveApiGatewayComboInput,
-    SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput, StartApiGatewayInput,
-    SwitchAccountInput, ToolId, UsageReports, VaultCredential, VaultCredentialInput,
-    VaultCredentialSummary, VaultStatus,
+    SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
+    StartApiGatewayInput, SwitchAccountInput, ToolId, UsageReports, VaultCredential,
+    VaultCredentialInput, VaultCredentialSummary, VaultStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -96,9 +96,7 @@ fn import_codex_account(
     state: State<'_, ManagedState>,
     input: ImportCodexAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state
-        .import_codex_account(input)
-        .map_err(display_error)?;
+    let snapshot = state.import_codex_account(input).map_err(display_error)?;
     tray::rebuild(&app);
     Ok(snapshot)
 }
@@ -148,6 +146,28 @@ fn switch_account(
 }
 
 #[tauri::command]
+fn retry_resume_job(
+    app: tauri::AppHandle,
+    state: State<'_, ManagedState>,
+    job_id: String,
+) -> Result<AppSnapshot, String> {
+    state.retry_resume_job(&app, &job_id).map_err(display_error)
+}
+
+#[tauri::command]
+fn cancel_resume_job(
+    state: State<'_, ManagedState>,
+    job_id: String,
+) -> Result<AppSnapshot, String> {
+    state.cancel_resume_job(&job_id).map_err(display_error)
+}
+
+#[tauri::command]
+fn open_resume_job(state: State<'_, ManagedState>, job_id: String) -> Result<AppSnapshot, String> {
+    state.open_resume_job(&job_id).map_err(display_error)
+}
+
+#[tauri::command]
 fn set_launcher(
     state: State<'_, ManagedState>,
     input: SetLauncherInput,
@@ -175,10 +195,7 @@ fn get_vault_status(state: State<'_, ManagedState>) -> Result<VaultStatus, Strin
 }
 
 #[tauri::command]
-async fn initialize_vault(
-    app: tauri::AppHandle,
-    passkey: String,
-) -> Result<VaultStatus, String> {
+async fn initialize_vault(app: tauri::AppHandle, passkey: String) -> Result<VaultStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<ManagedState>()
             .initialize_vault(passkey)
@@ -452,6 +469,9 @@ pub fn run() {
             fetch_gateway_models,
             rename_account,
             switch_account,
+            retry_resume_job,
+            cancel_resume_job,
+            open_resume_job,
             set_launcher,
             delete_account,
             get_vault_status,
@@ -484,6 +504,12 @@ pub fn run() {
             create_virtual_api_account
         ])
         .setup(|app| {
+            // Complete only the read-before-retry portion of any recovery that survived a
+            // process restart. No new turn is sent until a fresh exact ACK can be observed.
+            let startup_handle = app.handle().clone();
+            let _ = startup_handle
+                .state::<ManagedState>()
+                .heal_resume_jobs(Some(&startup_handle));
             // Menu-bar (tray) icon for quick account switching without opening the window.
             tray::create(app.handle())?;
             // Codex's optional desktop pet is a separate overlay window. Repair only its
@@ -535,6 +561,7 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 let state = codex_watch_handle.state::<ManagedState>();
+                let _ = state.heal_resume_jobs(Some(&codex_watch_handle));
                 let _ = state.check_codex_quota_error_and_auto_switch(Some(&codex_watch_handle));
             });
 
