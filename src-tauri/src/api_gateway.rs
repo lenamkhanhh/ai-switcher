@@ -853,7 +853,7 @@ fn persist_member_state(
     };
     // Read-modify-write under the store's write lock: these run on tokio workers without the
     // app's state mutex, so a plain load/save pair would drop a concurrent account change.
-    let _ = state.store.update(|data| {
+    if let Err(error) = state.store.update(|data| {
         // Upsert the participation entry's runtime state (it may not exist if the account was never
         // toggled — default-enabled accounts have no row until something happens to them).
         if let Some(entry) = data
@@ -877,7 +877,11 @@ fn persist_member_state(
                     error,
                 });
         }
-    });
+    }) {
+        eprintln!(
+            "AI Account Switcher: couldn't persist API gateway runtime state: {error:#}"
+        );
+    }
 }
 
 fn account_key(tool_id: &ToolId, account_id: &str) -> String {

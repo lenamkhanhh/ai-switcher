@@ -2270,6 +2270,97 @@ pub fn delete_account_files(tool_id: &ToolId, store: &Store, account_id: &str) -
     Ok(())
 }
 
+fn validate_account_id_component(account_id: &str) -> Result<()> {
+    if account_id.is_empty()
+        || account_id.len() > 128
+        || account_id == "."
+        || account_id == ".."
+        || account_id
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        anyhow::bail!("Invalid account id");
+    }
+    Ok(())
+}
+
+fn validate_staged_account_path(
+    tool_id: &ToolId,
+    store: &Store,
+    account_id: &str,
+    staged: &Path,
+) -> Result<()> {
+    validate_account_id_component(account_id)?;
+    let expected_parent = store.tool_accounts_root(tool_id);
+    if staged.parent() != Some(expected_parent.as_path())
+        || !staged
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".deleting-"))
+    {
+        anyhow::bail!("Invalid staged account path");
+    }
+    Ok(())
+}
+
+/// Move an account profile into a same-volume tombstone so a failed delete can be rolled back.
+pub fn stage_account_files(
+    tool_id: &ToolId,
+    store: &Store,
+    account_id: &str,
+) -> Result<Option<PathBuf>> {
+    validate_account_id_component(account_id)?;
+    let account_dir = store.account_dir(tool_id, account_id);
+    if !account_dir.exists() {
+        return Ok(None);
+    }
+    let staged = store.tool_accounts_root(tool_id).join(format!(
+        ".deleting-{account_id}-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::rename(&account_dir, &staged)
+        .with_context(|| format!("Couldn't stage the {tool_id:?} account for deletion"))?;
+    Ok(Some(staged))
+}
+
+/// Restore a staged profile to its original account path.
+pub fn restore_staged_account_files(
+    tool_id: &ToolId,
+    store: &Store,
+    account_id: &str,
+    staged: &Path,
+) -> Result<()> {
+    validate_staged_account_path(tool_id, store, account_id, staged)?;
+    if !staged.exists() {
+        return Ok(());
+    }
+    let target = store.account_dir(tool_id, account_id);
+    if target.exists() {
+        anyhow::bail!("The account profile already exists");
+    }
+    fs::rename(staged, target).context("Couldn't restore the account profile")?;
+    Ok(())
+}
+
+/// Permanently remove a staged account profile. Keychain cleanup remains in the existing
+/// `delete_account_files` helper so all platform-specific credential cleanup stays centralized.
+pub fn finalize_staged_account_files(
+    tool_id: &ToolId,
+    store: &Store,
+    account_id: &str,
+    staged: &Path,
+) -> Result<()> {
+    validate_staged_account_path(tool_id, store, account_id, staged)?;
+    let target = store.account_dir(tool_id, account_id);
+    if target.exists() {
+        anyhow::bail!("The account profile already exists");
+    }
+    if staged.exists() {
+        fs::remove_dir_all(staged).context("Couldn't finalize account deletion")?;
+    }
+    delete_account_files(tool_id, store, account_id)
+}
+
 fn run_login_command(binary: &str, args: &[&str]) -> Result<()> {
     let command = command_path(binary).unwrap_or_else(|| PathBuf::from(binary));
     if cfg!(windows) {
@@ -3107,8 +3198,8 @@ fn set_owner_only_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+fn set_owner_only_permissions(path: &Path) -> Result<()> {
+    crate::store::set_owner_only_permissions(path)
 }
 
 #[cfg(test)]

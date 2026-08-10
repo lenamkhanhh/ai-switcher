@@ -491,8 +491,8 @@ fn set_owner_only_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+fn set_owner_only_permissions(path: &Path) -> Result<()> {
+    crate::store::set_owner_only_permissions(path)
 }
 
 #[cfg(test)]

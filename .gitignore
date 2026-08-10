@@ -7,6 +7,13 @@ src-tauri/gen
 .env
 .env.local
 
+# Local UI automation, render, and scratch artifacts
+.playwright-cli/
+.tmp-render/
+output/
+portfolio/
+tmp/
+
 # Personal Claude Code settings
 .claude/settings.local.json
 

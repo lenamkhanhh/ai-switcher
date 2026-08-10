@@ -592,7 +592,7 @@ export function App() {
       }
     : { enabled: false, threshold: 100 };
   const activeAccount = visibleCurrentAccounts.find(
-    (account) => account.id === currentTool?.activeAccountId || account.state === "active",
+    (account) => account.id === currentTool?.activeAccountId,
   );
   const reportingAccountCount = visibleCurrentAccounts.filter(
     (account) =>
@@ -1183,8 +1183,12 @@ export function App() {
                 </div>
                 <div className="titleRow">
                   <h2>{currentTool.name}</h2>
-                  <span className={`status ${currentTool.installed ? "ok" : "muted"}`}>
-                    {currentTool.installed ? "Ready" : "Tool not installed"}
+                  <span
+                    className={`status ${
+                      currentTool.installed ? (attentionAccountCount > 0 ? "warn" : "ok") : "muted"
+                    }`}
+                  >
+                    {!currentTool.installed ? "Tool not installed" : attentionAccountCount > 0 ? "Needs attention" : "Ready"}
                   </span>
                   {currentTool.id !== "antigravity" && currentAutoSwitch.enabled && (
                     <span
@@ -2627,7 +2631,7 @@ function AccountCard({
   const isAntigravity = tool.id === "antigravity";
   const isApi = !!account.apiProvider;
   const isVirtualApi = account.fingerprint === "api-local";
-  const isActive = account.id === tool.activeAccountId || account.state === "active";
+  const isActive = account.id === tool.activeAccountId;
   const exhausted = account.state === "exhausted";
   const needsLogin = account.state === "needsLogin";
   const canReauthenticate = needsLogin && tool.id === "codex" && !account.isDefault && !isApi;

@@ -20,12 +20,14 @@ use crate::tools::{
     antigravity_capture, antigravity_current_token, antigravity_new_login, antigravity_open_ide,
     antigravity_quit_ide, antigravity_restore, antigravity_saved_profile, antigravity_saved_token,
     clear_active_profile, create_profile_with_default, current_platform, default_config_dir,
-    delete_account_files, full_launcher_name, install_shell_hook, is_installed,
+    delete_account_files, finalize_staged_account_files, full_launcher_name, install_shell_hook,
+    is_installed,
     launch_profile_login, launcher_name_collides_with_system, launcher_paths,
     link_shared_config_to, link_shared_sessions_to, refresh_codex_frontends_after_switch,
     is_codex_imported_session, mark_codex_imported_session, remove_launcher,
     restart_codex_runtime_after_switch, sync_codex_ide_credentials,
-    sync_reauthenticated_codex_credentials, write_active_profile, write_api_key_file,
+    restore_staged_account_files, stage_account_files, sync_reauthenticated_codex_credentials,
+    write_active_profile, write_api_key_file,
     write_api_launcher, write_claude_proxy_settings, write_codex_auth, write_codex_proxy_config,
     write_launcher,
 };
@@ -3191,7 +3193,7 @@ impl ManagedState {
     }
 
     pub fn delete_account(&self, tool_id: ToolId, account_id: String) -> Result<AppSnapshot> {
-        let (launcher, was_active) = {
+        let (original_data, launcher, was_active) = {
             let data = self
                 .data
                 .lock()
@@ -3210,21 +3212,108 @@ impl ManagedState {
             let was_active = active_account_id_for(&self.store, &tool_id, &data.accounts)
                 .as_deref()
                 == Some(account_id.as_str());
-            (account.launcher_command.clone(), was_active)
+            (data.clone(), account.launcher_command.clone(), was_active)
         };
 
         // A configured vault must be unlocked before deleting an account so its matching secret
         // record can be removed in the same user action instead of leaving an orphaned credential.
         self.vault.ensure_unlocked_for_account_delete()?;
-        delete_account_files(&tool_id, &self.store, &account_id)?;
-        if let Some(name) = launcher {
-            remove_launcher(&name);
+
+        let active_path = self.store.active_profile_path(&tool_id);
+        let active_contents = if was_active {
+            std::fs::read(&active_path).ok()
+        } else {
+            None
+        };
+        let original_credential = self.vault.get(&tool_id, &account_id)?;
+        let staged = stage_account_files(&tool_id, &self.store, &account_id)?;
+
+        // Every failure after staging restores state, credentials, the active profile file, and
+        // the profile directory. The profile is only permanently removed after all durable
+        // records have committed successfully.
+        let rollback = |error: anyhow::Error| -> Result<AppSnapshot> {
+            let mut rollback_errors = Vec::new();
+            if let Err(rollback_error) = self.store.save(&original_data) {
+                rollback_errors.push(format!("state: {rollback_error}"));
+            }
+            if let Some(credential) = original_credential.as_ref() {
+                if let Err(rollback_error) = self.vault.save(vault_input_from_credential(credential)) {
+                    rollback_errors.push(format!("vault: {rollback_error}"));
+                }
+            }
+            if was_active {
+                if let Err(rollback_error) =
+                    restore_active_profile_file(&active_path, active_contents.as_deref())
+                {
+                    rollback_errors.push(format!("active profile: {rollback_error}"));
+                }
+            }
+            if let Some(staged_path) = staged.as_deref() {
+                if let Err(rollback_error) = restore_staged_account_files(
+                    &tool_id,
+                    &self.store,
+                    &account_id,
+                    staged_path,
+                ) {
+                    rollback_errors.push(format!("account files: {rollback_error}"));
+                }
+            }
+            if rollback_errors.is_empty() {
+                Err(error)
+            } else {
+                Err(error.context(format!(
+                    "Account deletion rolled back with warnings: {}",
+                    rollback_errors.join("; ")
+                )))
+            }
+        };
+
+        let mut next_data = original_data.clone();
+        next_data
+            .accounts
+            .retain(|account| !(account.tool_id == tool_id && account.id == account_id));
+        next_data.api_gateway.accounts.retain(|entry| {
+            !(entry.tool_id == tool_id && entry.account_id == account_id)
+        });
+        next_data.api_gateway.model_registry.retain(|entry| {
+            !(entry.tool_id == tool_id && entry.account_id == account_id)
+        });
+        next_data.auto_prime.remove(&account_id);
+        next_data.auto_ping.remove(&account_id);
+
+        if let Err(error) = self.store.save(&next_data) {
+            return rollback(error.context("Couldn't save account deletion"));
         }
+        if let Err(error) = self.vault.delete(&tool_id, &account_id) {
+            return rollback(error.context("Couldn't remove the account's saved credentials"));
+        }
+
         // Deleting the active account (the one the plain command uses) → clear the active file so
         // the plain command falls back to the machine Default, NOT leaving it pointing to a deleted profile.
         if was_active && matches!(tool_id, ToolId::Claude | ToolId::Codex) {
-            let _ = clear_active_profile(&tool_id, &self.store);
-            let _ = install_shell_hook(&self.store);
+            if let Err(error) = clear_active_profile(&tool_id, &self.store)
+                .and_then(|_| install_shell_hook(&self.store))
+            {
+                return rollback(error.context("Couldn't clear the deleted account's active profile"));
+            }
+        }
+
+        if let Some(name) = launcher {
+            remove_launcher(&name);
+        }
+        if let Some(staged_path) = staged.as_deref() {
+            if let Err(error) = finalize_staged_account_files(
+                &tool_id,
+                &self.store,
+                &account_id,
+                staged_path,
+            ) {
+                return rollback(error.context("Couldn't finalize account deletion"));
+            }
+        } else {
+            // No profile directory was present (for example, an interrupted prior cleanup), but
+            // the encrypted record still needs the same final cleanup path.
+            delete_account_files(&tool_id, &self.store, &account_id)?;
         }
 
         {
@@ -3232,11 +3321,8 @@ impl ManagedState {
                 .data
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            data.accounts
-                .retain(|account| !(account.tool_id == tool_id && account.id == account_id));
-            self.store.save(&data)?;
+            *data = self.store.load().unwrap_or(next_data);
         }
-        self.vault.delete(&tool_id, &account_id)?;
         self.snapshot()
     }
 
@@ -3712,6 +3798,35 @@ fn is_installed_resolved(data: &StoredState, tool_id: &ToolId) -> bool {
         .and_then(|setup| setup.binary_path.as_ref())
         .is_some_and(|path| path.exists())
         || is_installed(tool_id)
+}
+
+fn vault_input_from_credential(credential: &VaultCredential) -> VaultCredentialInput {
+    VaultCredentialInput {
+        tool_id: credential.tool_id.clone(),
+        account_id: credential.account_id.clone(),
+        username: credential.username.clone(),
+        password: credential.password.clone(),
+        totp_secret: credential.totp_secret.clone(),
+        source: credential.source.clone(),
+        notes: credential.notes.clone(),
+    }
+}
+
+fn restore_active_profile_file(path: &std::path::Path, contents: Option<&[u8]>) -> Result<()> {
+    match contents {
+        Some(bytes) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, bytes)?;
+        }
+        None => {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The account the PLAIN COMMAND is using. For Claude/Codex this is the real source of truth:

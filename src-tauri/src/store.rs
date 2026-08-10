@@ -53,26 +53,71 @@ fn default_threshold() -> f64 {
 static STATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
-fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
+pub(crate) fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &std::path::Path) -> Result<()> {
-    Ok(())
+#[cfg(windows)]
+pub(crate) fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
+    apply_windows_acl(path)
 }
 
 #[cfg(unix)]
-fn set_owner_only_directory_permissions(path: &std::path::Path) -> Result<()> {
+pub(crate) fn set_owner_only_directory_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn set_owner_only_directory_permissions(_path: &std::path::Path) -> Result<()> {
+#[cfg(windows)]
+pub(crate) fn set_owner_only_directory_permissions(path: &std::path::Path) -> Result<()> {
+    apply_windows_acl(path)
+}
+
+#[cfg(windows)]
+fn windows_system_binary(name: &str) -> Result<std::path::PathBuf> {
+    let root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context("Windows system directory is unavailable")?;
+    Ok(root.join("System32").join(name))
+}
+
+#[cfg(windows)]
+fn windows_current_principal() -> Result<String> {
+    let output = std::process::Command::new(windows_system_binary("whoami.exe")?)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .context("Couldn't identify the Windows user")?;
+    if !output.status.success() {
+        anyhow::bail!("Couldn't identify the Windows user");
+    }
+    let principal = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if principal.is_empty() {
+        anyhow::bail!("Couldn't identify the Windows user");
+    }
+    Ok(principal)
+}
+
+#[cfg(windows)]
+fn apply_windows_acl(path: &std::path::Path) -> Result<()> {
+    let principal = windows_current_principal()?;
+    let status = std::process::Command::new(windows_system_binary("icacls.exe")?)
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("{principal}:F"))
+        .arg("*S-1-5-18:F")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Couldn't secure persisted app data")?;
+    if !status.success() {
+        anyhow::bail!("Couldn't secure persisted app data");
+    }
     Ok(())
 }
 
@@ -224,7 +269,14 @@ impl Store {
 
     pub fn save(&self, state: &StoredState) -> Result<()> {
         let _guard = lock_state_writes();
-        self.write_state(state)
+        // Gateway workers persist live cooldown/error state independently from the app mutex.
+        // Preserve those newer runtime fields when an older UI snapshot is saved, while still
+        // allowing the caller to remove participation entries for deleted accounts.
+        let mut merged = state.clone();
+        if let Ok(latest) = self.load() {
+            merge_gateway_runtime_state(&mut merged, &latest);
+        }
+        self.write_state(&merged)
     }
 
     /// Load, mutate and save while holding the write lock, so two threads can't each read the
@@ -267,6 +319,33 @@ impl Store {
         fs::create_dir_all(root.join("accounts"))?;
         fs::create_dir_all(root.join("backups"))?;
         Ok(Self { root })
+    }
+}
+
+fn merge_gateway_runtime_state(incoming: &mut StoredState, latest: &StoredState) {
+    let account_exists = |tool_id: &ToolId, account_id: &str| {
+        incoming
+            .accounts
+            .iter()
+            .any(|account| &account.tool_id == tool_id && account.id == account_id)
+    };
+
+    incoming.api_gateway.accounts.retain(|entry| {
+        account_exists(&entry.tool_id, &entry.account_id)
+    });
+
+    for latest_entry in latest.api_gateway.accounts.iter().filter(|entry| {
+        account_exists(&entry.tool_id, &entry.account_id)
+    }) {
+        if let Some(current) = incoming.api_gateway.accounts.iter_mut().find(|entry| {
+            entry.tool_id == latest_entry.tool_id && entry.account_id == latest_entry.account_id
+        }) {
+            current.state = latest_entry.state.clone();
+            current.cooldown_until = latest_entry.cooldown_until.clone();
+            current.error = latest_entry.error.clone();
+        } else {
+            incoming.api_gateway.accounts.push(latest_entry.clone());
+        }
     }
 }
 
