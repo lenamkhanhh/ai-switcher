@@ -563,7 +563,24 @@ pub fn classify_codex_error(error: &Value, status: Option<&str>) -> RecoveryErro
     if matches!(status, Some("interrupted" | "cancelled")) {
         return RecoveryErrorKind::UserCancelled;
     }
+    if error_message(error).is_some_and(|message| is_capacity_error_message(message)) {
+        return RecoveryErrorKind::ServerOverloaded;
+    }
     RecoveryErrorKind::Unknown
+}
+
+fn error_message(error: &Value) -> Option<&str> {
+    error
+        .get("message")
+        .or_else(|| error.get("error").and_then(|nested| nested.get("message")))
+        .and_then(Value::as_str)
+}
+
+pub fn is_capacity_error_message(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("at capacity") && (lower.contains("model") || lower.contains("server")))
+        || lower.contains("serveroverloaded")
+        || lower.contains("server overloaded")
 }
 
 fn structured_error_kind(value: &Value) -> Option<RecoveryErrorKind> {

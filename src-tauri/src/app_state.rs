@@ -1,6 +1,6 @@
 use crate::codex_app_server::{
-    classify_terminal_turn, recovery_error_message, terminal_error_fingerprint, AppServerConfig,
-    CodexAppServerClient,
+    classify_terminal_turn, is_capacity_error_message, recovery_error_message,
+    terminal_error_fingerprint, AppServerConfig, CodexAppServerClient,
 };
 use crate::codex_import::{codex_auth_json, parse_k12_export};
 use crate::models::{
@@ -1658,29 +1658,51 @@ impl ManagedState {
                 if let Some(next_attempt) = next_attempt {
                     self.emit_recovery_message(app, &message);
                     drop(client);
-                    std::thread::sleep(recovery_retry_delay(next_attempt));
-                    if let Err(error) = self.retry_same_account(
-                        &job_id,
-                        &thread_id,
-                        &runtime,
-                        goal.as_ref(),
-                        &manifest_path,
-                        &recovery_id,
-                        next_attempt,
-                        &current.name,
-                        &binary,
-                        &default_dir,
-                        &cwd,
-                        app,
-                    ) {
-                        self.mark_resume_attention(
+                    let mut retry_attempt = next_attempt;
+                    loop {
+                        std::thread::sleep(recovery_retry_delay(retry_attempt));
+                        match self.retry_same_account(
                             &job_id,
-                            format!(
-                                "Resume could not be verified: {}.",
-                                crate::codex_app_server::redact_text(&error.to_string())
-                            ),
+                            &thread_id,
+                            &runtime,
+                            goal.as_ref(),
+                            &manifest_path,
+                            &recovery_id,
+                            retry_attempt,
+                            &current.name,
+                            &binary,
+                            &default_dir,
+                            &cwd,
                             app,
-                        )?;
+                        ) {
+                            Ok(()) => break,
+                            Err(error)
+                                if is_capacity_error_message(&error.to_string())
+                                    && retry_attempt < 3 =>
+                            {
+                                let Some(next) = self.schedule_capacity_retry(&job_id, &message)?
+                                else {
+                                    self.mark_resume_attention(
+                                        &job_id,
+                                        "The selected model remained at capacity after 3 recovery attempts.".into(),
+                                        app,
+                                    )?;
+                                    break;
+                                };
+                                retry_attempt = next;
+                            }
+                            Err(error) => {
+                                self.mark_resume_attention(
+                                    &job_id,
+                                    format!(
+                                        "Resume could not be verified: {}.",
+                                        crate::codex_app_server::redact_text(&error.to_string())
+                                    ),
+                                    app,
+                                )?;
+                                break;
+                            }
+                        }
                     }
                     return Ok(true);
                 }
@@ -4017,12 +4039,15 @@ fn codex_quota_error_line(line: &str) -> bool {
         line.to_string()
     };
     let lower = text.to_ascii_lowercase();
-    (lower.contains("quota") || lower.contains("rate limit") || lower.contains("usage limit"))
-        && (lower.contains("exceeded")
-            || lower.contains("reached")
-            || lower.contains("exhausted")
-            || lower.contains("429")
-            || lower.contains("limit"))
+    is_capacity_error_message(&lower)
+        || (lower.contains("quota")
+            || lower.contains("rate limit")
+            || lower.contains("usage limit"))
+            && (lower.contains("exceeded")
+                || lower.contains("reached")
+                || lower.contains("exhausted")
+                || lower.contains("429")
+                || lower.contains("limit"))
 }
 
 fn quota_requires_reauth(tool_id: &ToolId, quota: &QuotaInfo) -> bool {
