@@ -902,17 +902,15 @@ export function App() {
               Retry
             </button>
           )}
-          {visibleRecoveryJob.status !== "needsAttention" && visibleRecoveryJob.status !== "failed" && (
-            <button
-              type="button"
-              className="iconButton"
-              disabled={busy === `resume-cancel-${visibleRecoveryJob.id}`}
-              title="Cancel recovery"
-              onClick={() => void run(`resume-cancel-${visibleRecoveryJob.id}`, () => api.cancelResumeJob(visibleRecoveryJob.id))}
-            >
-              <X />
-            </button>
-          )}
+          <button
+            type="button"
+            className="iconButton"
+            disabled={busy === `resume-cancel-${visibleRecoveryJob.id}`}
+            title="Dismiss recovery"
+            onClick={() => void run(`resume-cancel-${visibleRecoveryJob.id}`, () => api.cancelResumeJob(visibleRecoveryJob.id))}
+          >
+            <X />
+          </button>
         </section>
       )}
 
@@ -3724,7 +3722,7 @@ function CandidateList({
 }
 
 function stateLabel(state: Account["state"]) {
-  if (state === "needsLogin") return "Signing in";
+  if (state === "needsLogin") return "Needs login";
   if (state === "exhausted") return "Out of quota";
   if (state === "active") return "In use";
   return "Ready";

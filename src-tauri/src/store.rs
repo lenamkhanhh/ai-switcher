@@ -86,8 +86,23 @@ fn windows_system_binary(name: &str) -> Result<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
+fn hidden_windows_command(path: std::path::PathBuf) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut command = std::process::Command::new(path);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(windows)]
 fn windows_current_principal() -> Result<String> {
-    let output = std::process::Command::new(windows_system_binary("whoami.exe")?)
+    static PRINCIPAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(principal) = PRINCIPAL.get() {
+        return Ok(principal.clone());
+    }
+
+    let output = hidden_windows_command(windows_system_binary("whoami.exe")?)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -99,13 +114,14 @@ fn windows_current_principal() -> Result<String> {
     if principal.is_empty() {
         anyhow::bail!("Couldn't identify the Windows user");
     }
+    let _ = PRINCIPAL.set(principal.clone());
     Ok(principal)
 }
 
 #[cfg(windows)]
 fn apply_windows_acl(path: &std::path::Path) -> Result<()> {
     let principal = windows_current_principal()?;
-    let status = std::process::Command::new(windows_system_binary("icacls.exe")?)
+    let status = hidden_windows_command(windows_system_binary("icacls.exe")?)
         .arg(path)
         .args(["/inheritance:r", "/grant:r"])
         .arg(format!("{principal}:F"))
@@ -149,9 +165,8 @@ impl Default for StoredState {
 }
 
 fn current_schema_version() -> u32 {
-    // Version 3 adds the durable transactional recovery fields. Every new field is serde-defaulted
-    // so older state files remain readable and are upgraded in place on the next save.
-    3
+    // Version 4 retires legacy recovery statuses that otherwise remain visible forever.
+    4
 }
 
 #[derive(Clone)]
@@ -166,6 +181,7 @@ impl Store {
         let root = dirs.data_local_dir().to_path_buf();
         fs::create_dir_all(root.join("accounts"))?;
         fs::create_dir_all(root.join("backups"))?;
+        cleanup_stale_state_staging_files(&root)?;
         set_owner_only_directory_permissions(&root)?;
         set_owner_only_directory_permissions(&root.join("accounts"))?;
         set_owner_only_directory_permissions(&root.join("backups"))?;
@@ -322,6 +338,36 @@ impl Store {
     }
 }
 
+fn cleanup_stale_state_staging_files(root: &std::path::Path) -> Result<()> {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let now = std::time::SystemTime::now();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(process_suffix) = name.strip_prefix("state.json.tmp") else {
+            continue;
+        };
+        if process_suffix.is_empty() || !process_suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        if old_enough && metadata.is_file() {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("Couldn't remove stale state staging file"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn merge_gateway_runtime_state(incoming: &mut StoredState, latest: &StoredState) {
     let account_exists = |tool_id: &ToolId, account_id: &str| {
         incoming
@@ -330,13 +376,17 @@ fn merge_gateway_runtime_state(incoming: &mut StoredState, latest: &StoredState)
             .any(|account| &account.tool_id == tool_id && account.id == account_id)
     };
 
-    incoming.api_gateway.accounts.retain(|entry| {
-        account_exists(&entry.tool_id, &entry.account_id)
-    });
+    incoming
+        .api_gateway
+        .accounts
+        .retain(|entry| account_exists(&entry.tool_id, &entry.account_id));
 
-    for latest_entry in latest.api_gateway.accounts.iter().filter(|entry| {
-        account_exists(&entry.tool_id, &entry.account_id)
-    }) {
+    for latest_entry in latest
+        .api_gateway
+        .accounts
+        .iter()
+        .filter(|entry| account_exists(&entry.tool_id, &entry.account_id))
+    {
         if let Some(current) = incoming.api_gateway.accounts.iter_mut().find(|entry| {
             entry.tool_id == latest_entry.tool_id && entry.account_id == latest_entry.account_id
         }) {
@@ -402,6 +452,13 @@ mod tests {
         let unrelated = root.join("state.json.tmp-not-a-process");
         fs::write(&stale, b"stale").unwrap();
         fs::write(&unrelated, b"keep").unwrap();
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
 
         cleanup_stale_state_staging_files(root).unwrap();
 
@@ -498,7 +555,10 @@ mod tests {
         let entry = persisted.api_gateway.accounts.first().unwrap();
         assert_eq!(persisted.auto_switch_threshold, 88.0);
         assert_eq!(entry.state, ApiPoolAccountState::CoolingDown);
-        assert_eq!(entry.cooldown_until.as_deref(), Some("2026-08-07T15:00:00Z"));
+        assert_eq!(
+            entry.cooldown_until.as_deref(),
+            Some("2026-08-07T15:00:00Z")
+        );
         assert_eq!(entry.error.as_deref(), Some("rate limited"));
         let _ = fs::remove_dir_all(store.root_dir());
     }

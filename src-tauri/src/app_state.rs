@@ -74,6 +74,7 @@ impl ManagedState {
         migrate_codex_imported_login_methods(&store, &mut data.accounts);
         migrate_codex_reauth_states(&mut data.accounts);
         migrate_auto_switch_settings(&mut data);
+        migrate_resume_jobs(&mut data);
         retire_auto_ping_settings(&mut data);
         autodetect_missing_tool_setups(&store, &mut data);
         store.save(&data)?;
@@ -2376,7 +2377,7 @@ impl ManagedState {
 
     pub fn cancel_resume_job(&self, job_id: &str) -> Result<AppSnapshot> {
         self.update_resume_job(job_id, |job| {
-            if !job.status.is_terminal() {
+            if job.status.is_dismissible() {
                 job.status = ResumeJobStatus::Cancelled;
                 job.error = Some("Cancelled by the user".into());
             }
@@ -3531,6 +3532,37 @@ fn migrate_auto_switch_settings(data: &mut StoredState) {
         .auto_switch_settings
         .values()
         .any(|setting| setting.enabled);
+}
+
+fn migrate_resume_jobs(data: &mut StoredState) {
+    const RECOVERY_SCHEMA_VERSION: u32 = 4;
+    const TERMINAL_HISTORY_LIMIT: usize = 20;
+
+    if data.schema_version < RECOVERY_SCHEMA_VERSION {
+        for job in &mut data.resume_jobs {
+            job.status = match &job.status {
+                ResumeJobStatus::Resumed => ResumeJobStatus::Completed,
+                ResumeJobStatus::Failed => ResumeJobStatus::Cancelled,
+                status => status.clone(),
+            };
+        }
+        data.schema_version = RECOVERY_SCHEMA_VERSION;
+    }
+
+    let terminal_count = data
+        .resume_jobs
+        .iter()
+        .filter(|job| job.status.is_terminal())
+        .count();
+    let mut terminal_to_drop = terminal_count.saturating_sub(TERMINAL_HISTORY_LIMIT);
+    data.resume_jobs.retain(|job| {
+        if terminal_to_drop > 0 && job.status.is_terminal() {
+            terminal_to_drop -= 1;
+            false
+        } else {
+            true
+        }
+    });
 }
 
 fn retire_auto_ping_settings(data: &mut StoredState) {

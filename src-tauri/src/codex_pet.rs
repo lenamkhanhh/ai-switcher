@@ -245,15 +245,7 @@ mod windows_impl {
         let Some(path) = process_path(process_id) else {
             return TRUE;
         };
-        if !is_codex_pet_window(
-            &path,
-            &title,
-            &class_name,
-            width,
-            window_height,
-            true,
-            true,
-        ) {
+        if !is_codex_pet_window(&path, &title, &class_name, width, window_height, true, true) {
             return TRUE;
         }
         context.targets.push((hwnd, process_id));
@@ -349,7 +341,7 @@ mod windows_impl {
                 target.0,
                 target.1,
                 width,
-                desired_height,
+                current_height,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
@@ -528,5 +520,4 @@ mod tests {
         assert!(!should_reposition_pet(current, work_area));
         assert_eq!(safe_pet_position(current, work_area), (420, 180));
     }
-
 }

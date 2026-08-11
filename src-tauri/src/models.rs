@@ -531,7 +531,14 @@ pub enum ResumeJobStatus {
 
 impl ResumeJobStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Resumed
+        )
+    }
+
+    pub fn is_dismissible(&self) -> bool {
+        !matches!(self, Self::Completed | Self::Cancelled)
     }
 
     pub fn is_acknowledged(&self) -> bool {

@@ -60,12 +60,7 @@ struct LoginPromptFinishedEvent {
 }
 
 impl LoginPromptFinishedEvent {
-    fn new(
-        tool_id: ToolId,
-        account_id: impl Into<String>,
-        attempt_id: u64,
-        success: bool,
-    ) -> Self {
+    fn new(tool_id: ToolId, account_id: impl Into<String>, attempt_id: u64, success: bool) -> Self {
         Self {
             tool_id,
             account_id: account_id.into(),
@@ -251,10 +246,7 @@ pub(crate) fn write_codex_auth(profile: &Path, bytes: &[u8]) -> Result<()> {
     }
 
     fs::create_dir_all(profile)?;
-    let temporary = profile.join(format!(
-        ".auth.json.import-{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
+    let temporary = profile.join(format!(".auth.json.import-{}.tmp", uuid::Uuid::new_v4()));
     if let Err(error) = fs::write(&temporary, bytes) {
         let _ = fs::remove_file(&temporary);
         return Err(error).with_context(|| "Couldn't stage imported Codex credentials");
@@ -654,7 +646,10 @@ mod codex_ide_credential_tests {
 
         let second = auth("imported", "second");
         assert!(write_codex_auth(&profile, &second).is_err());
-        assert_eq!(fs::read(profile.join("auth.json")).unwrap(), auth("imported", "first"));
+        assert_eq!(
+            fs::read(profile.join("auth.json")).unwrap(),
+            auth("imported", "first")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -841,14 +836,12 @@ mod codex_ide_credential_tests {
         let script = codex_frontend_refresh_script();
 
         assert!(script.contains("[System.Windows.Forms.Clipboard]::GetDataObject()"));
-        assert!(script.contains(
-            "[System.Windows.Forms.Clipboard]::SetText('Developer: Reload Window')"
-        ));
+        assert!(script
+            .contains("[System.Windows.Forms.Clipboard]::SetText('Developer: Reload Window')"));
         assert!(script.contains("[System.Windows.Forms.SendKeys]::SendWait('^v')"));
         assert!(script.contains("[System.Windows.Forms.Clipboard]::SetDataObject("));
-        assert!(!script.contains(
-            "[System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')"
-        ));
+        assert!(!script
+            .contains("[System.Windows.Forms.SendKeys]::SendWait('Developer: Reload Window')"));
     }
 }
 
@@ -1050,7 +1043,9 @@ const AG_PROFILE_KEY: &str = "antigravity.profileUrl";
 /// Read one state.vscdb key as a safe SQL literal (quote() handles both TEXT/BLOB).
 /// None if the key is absent or empty.
 fn ag_read_key_literal(db: &Path, key: &str) -> Option<String> {
-    let out = Command::new("sqlite3")
+    let mut command = Command::new("sqlite3");
+    hide_command_window(&mut command);
+    let out = command
         .arg(db)
         .arg(format!(
             "SELECT quote(value) FROM ItemTable WHERE key='{key}';"
@@ -1070,7 +1065,9 @@ fn ag_read_key_literal(db: &Path, key: &str) -> Option<String> {
 
 /// Write (INSERT OR REPLACE) one key into state.vscdb with an already-quoted SQL literal.
 fn ag_write_key(db: &Path, key: &str, literal: &str) -> Result<()> {
-    let status = Command::new("sqlite3")
+    let mut command = Command::new("sqlite3");
+    hide_command_window(&mut command);
+    let status = command
         .arg(db)
         .arg(format!(
             "INSERT OR REPLACE INTO ItemTable(key,value) VALUES('{key}',{literal});"
@@ -2126,7 +2123,11 @@ fn powershell_profile_paths() -> Vec<PathBuf> {
             .find(|root| root.is_dir())
             .cloned()
             .unwrap_or_else(|| home_dir().join("Documents"));
-        out.push(target_root.join(host).join("Microsoft.PowerShell_profile.ps1"));
+        out.push(
+            target_root
+                .join(host)
+                .join("Microsoft.PowerShell_profile.ps1"),
+        );
     }
     out
 }
@@ -2314,10 +2315,9 @@ pub fn stage_account_files(
     if !account_dir.exists() {
         return Ok(None);
     }
-    let staged = store.tool_accounts_root(tool_id).join(format!(
-        ".deleting-{account_id}-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let staged = store
+        .tool_accounts_root(tool_id)
+        .join(format!(".deleting-{account_id}-{}", uuid::Uuid::new_v4()));
     fs::rename(&account_dir, &staged)
         .with_context(|| format!("Couldn't stage the {tool_id:?} account for deletion"))?;
     Ok(Some(staged))
@@ -2428,10 +2428,7 @@ mod tests {
 
     #[test]
     fn staged_account_files_can_be_restored_or_finalized() {
-        let root = std::env::temp_dir().join(format!(
-            "aisw-delete-stage-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("aisw-delete-stage-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let store = Store::for_test(root.clone()).unwrap();
         let profile = store.account_dir(&ToolId::Codex, "acc1");
@@ -2820,12 +2817,7 @@ fn run_hidden_profile_login_command_legacy(
         Err(error) => {
             let _ = app.emit(
                 "login-prompt-finished",
-                LoginPromptFinishedEvent::new(
-                    tool_id,
-                    account_id,
-                    attempt_id,
-                    false,
-                ),
+                LoginPromptFinishedEvent::new(tool_id, account_id, attempt_id, false),
             );
             return Err(error).context("Couldn't start the hidden Codex login process");
         }

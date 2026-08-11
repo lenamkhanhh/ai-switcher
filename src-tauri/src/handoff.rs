@@ -381,6 +381,7 @@ fn git_output(cwd: &Path, args: &[&str], max_bytes: usize) -> String {
 
 fn git_output_bytes(cwd: &Path, args: &[&str], max_bytes: usize) -> Vec<u8> {
     let mut command = Command::new("git");
+    crate::tools::hide_command_window(&mut command);
     command
         .args(args)
         .current_dir(cwd)
