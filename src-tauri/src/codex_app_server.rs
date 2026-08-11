@@ -423,7 +423,7 @@ impl CodexAppServerClient {
                         .iter()
                         .find(|candidate| candidate.id == requested_model)
                 })
-                .map_or(false, |candidate| {
+                .is_some_and(|candidate| {
                     candidate
                         .reasoning_efforts
                         .iter()
@@ -800,7 +800,7 @@ fn bounded_text(text: &str, max_chars: usize) -> String {
     let mut output = String::new();
     for (index, ch) in text.chars().enumerate() {
         if index >= max_chars {
-            output.push_str("…");
+            output.push('…');
             break;
         }
         output.push(ch);

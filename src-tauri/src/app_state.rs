@@ -174,7 +174,7 @@ impl ManagedState {
             if let Ok(entries) = std::fs::read_dir(&tool_root) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() && !valid_dirs.iter().any(|d| *d == path) {
+                    if path.is_dir() && !valid_dirs.contains(&path) {
                         let _ = std::fs::remove_dir_all(&path);
                     }
                 }
@@ -1226,14 +1226,14 @@ impl ManagedState {
         threshold: f64,
         app: Option<&AppHandle>,
     ) -> Result<()> {
-        if tool_id == &ToolId::Codex {
-            if self.try_seamless_codex_handoff(
+        if tool_id == &ToolId::Codex
+            && self.try_seamless_codex_handoff(
                 threshold.min(crate::seamless::DEFAULT_HANDOFF_THRESHOLD),
                 false,
                 app,
-            )? {
-                return Ok(());
-            }
+            )?
+        {
+            return Ok(());
         }
         if !matches!(tool_id, ToolId::Claude | ToolId::Codex) {
             return Ok(());
@@ -1929,6 +1929,7 @@ impl ManagedState {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn retry_same_account(
         &self,
         job_id: &str,
@@ -4403,6 +4404,8 @@ fn local_time_label_from_iso(iso: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
 
     fn test_resume_job(id: &str, status: ResumeJobStatus) -> ResumeJob {

@@ -101,11 +101,13 @@ pub fn start_server(store: Store, config: ApiGatewayConfig) -> Result<ApiServerH
         config.port,
     );
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let mut runtime = GatewayRuntime::default();
     // Routing reads cooldowns from memory, so a restart used to hand every rate-limited account a
     // clean slate and walk straight back into the same 429 — while the UI still showed it cooling
     // down from the persisted timestamp.
-    runtime.cooldowns = restore_cooldowns(&store);
+    let runtime = GatewayRuntime {
+        cooldowns: restore_cooldowns(&store),
+        ..GatewayRuntime::default()
+    };
     let state = GatewayState {
         store,
         client: build_upstream_client(),
@@ -536,6 +538,7 @@ fn gateway_account_enabled(data: &StoredState, tool_id: &ToolId, account_id: &st
         .is_none_or(|entry| entry.enabled)
 }
 
+#[allow(clippy::result_large_err)]
 fn authorized_state(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -1332,6 +1335,7 @@ fn message_text(message: &Value) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn build_claude_request(
     state: &GatewayState,
     data: &StoredState,
@@ -1441,6 +1445,7 @@ fn ensure_claude_code_system(body: &mut Value) {
     object.insert("system".to_string(), Value::Array(blocks));
 }
 
+#[allow(clippy::result_large_err)]
 fn build_codex_request(
     state: &GatewayState,
     data: &StoredState,
@@ -1485,10 +1490,10 @@ fn sanitize_codex_body(body: &mut Value) {
             .entry("stream".to_string())
             .or_insert(Value::Bool(true));
         // `instructions` is required; provide a default if a caller didn't set one.
-        if !object
+        if object
             .get("instructions")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_none_or(|value| value.is_empty())
         {
             object.insert(
                 "instructions".to_string(),
@@ -1681,6 +1686,7 @@ fn parse_codex_model_response(response: &Value) -> Result<Vec<String>> {
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn translate_response(
     store: &Store,
     response: reqwest::Response,
@@ -3118,6 +3124,8 @@ fn api_error(status: StatusCode, kind: &str, message: impl Into<String>) -> Resp
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use crate::models::{ApiGatewayKey, QuotaInfo, QuotaWindow};
 

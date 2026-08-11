@@ -562,7 +562,6 @@ fn read_codex_rollout_quota() -> Result<QuotaInfo> {
 /// `<config_dir>/auth.json` (`tokens.access_token`). Returns rate_limit.primary_window
 /// (5h, limit_window_seconds 18000) + secondary_window (weekly, 604800), each with
 /// `used_percent` + `reset_at` (unix seconds).
-
 fn read_codex_usage_endpoint(config_dir: &Path) -> Result<QuotaInfo> {
     let token = codex_access_token_fresh_result(config_dir)?;
     let body = curl_get(

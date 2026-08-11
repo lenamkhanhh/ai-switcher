@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn clears_only_the_click_through_flag() {
-        let before = 0x0280_0AA_u64;
+        let before = 0x0028_00AA_u64;
         let after = clear_transparent_exstyle(before);
         assert_eq!(after, before & !0x20);
         assert_eq!(after & 0x08, before & 0x08); // topmost is preserved
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn leaves_already_interactive_windows_unchanged() {
-        assert_eq!(clear_transparent_exstyle(0x0280_088), 0x0280_088);
+        assert_eq!(clear_transparent_exstyle(0x0028_0088), 0x0028_0088);
     }
 
     #[test]

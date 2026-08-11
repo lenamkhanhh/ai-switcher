@@ -306,7 +306,7 @@ fn status_for(path: &Path, session: Option<&VaultSession>) -> VaultStatus {
 }
 
 fn validate_passkey(passkey: &str) -> Result<()> {
-    if passkey.as_bytes().len() < MIN_PASSKEY_BYTES {
+    if passkey.len() < MIN_PASSKEY_BYTES {
         bail!("Vault passkey must be at least {MIN_PASSKEY_BYTES} characters");
     }
     if passkey.as_bytes().contains(&0) {
@@ -433,7 +433,7 @@ fn decrypt_document(key: &[u8; KEY_LEN], envelope: &VaultEnvelope) -> Result<Vau
             Nonce::try_assume_unique_for_key(&nonce)
                 .map_err(|_| anyhow::anyhow!("Vault could not be unlocked"))?,
             Aad::from(AAD),
-            &mut *ciphertext,
+            &mut ciphertext,
         )
         .map_err(|_| anyhow::anyhow!("Vault could not be unlocked"))?;
     let document: VaultDocument = serde_json::from_slice(plaintext)

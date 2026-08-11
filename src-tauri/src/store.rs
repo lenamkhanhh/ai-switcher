@@ -433,6 +433,8 @@ pub(crate) fn set_recovery_manifest_directory_permissions(path: &std::path::Path
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use crate::models::{ApiGatewayAccount, ApiPoolAccountState, ToolId};
     use std::time::{SystemTime, UNIX_EPOCH};

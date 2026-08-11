@@ -306,7 +306,7 @@ pub struct ApiGatewayStatus {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiGatewaySnapshot {
     pub config: ApiGatewayConfig,
@@ -341,15 +341,6 @@ impl Default for ApiGatewayStatus {
             state: ApiGatewayServerState::Stopped,
             base_url: "http://127.0.0.1:8783".to_string(),
             error: None,
-        }
-    }
-}
-
-impl Default for ApiGatewaySnapshot {
-    fn default() -> Self {
-        Self {
-            config: ApiGatewayConfig::default(),
-            status: ApiGatewayStatus::default(),
         }
     }
 }

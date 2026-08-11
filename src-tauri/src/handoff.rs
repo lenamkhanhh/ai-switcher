@@ -31,6 +31,7 @@ struct HandoffContext {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct RolloutCheckpoint {
     pub session_id: String,
     pub cwd: String,
@@ -47,6 +48,7 @@ pub struct RolloutCheckpoint {
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 pub fn checkpoint_from_rollout(
     file: &Path,
     handoff_dir: &Path,
@@ -116,6 +118,7 @@ pub fn thread_id_from_rollout(file: &Path) -> Result<Option<String>> {
     Ok(parse_handoff_context(&lines).session_id)
 }
 
+#[allow(dead_code)]
 fn last_event_timestamp(lines: &[String]) -> Option<String> {
     lines
         .iter()
@@ -130,6 +133,7 @@ fn last_event_timestamp(lines: &[String]) -> Option<String> {
         })
 }
 
+#[allow(dead_code)]
 pub fn continuation_prompt(checkpoint_path: &Path) -> String {
     format!("Continue the interrupted task using the existing session context and checkpoint. Do not scan the full repository. Inspect only files needed for the next incomplete step. Verify existing edits before changing more. Checkpoint: {}", checkpoint_path.display())
 }
@@ -249,6 +253,7 @@ pub fn plan_from_thread(snapshot: &ThreadSnapshot) -> Vec<RecoveryPlanStep> {
     steps
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn manifest_from_thread(
     recovery_id: &str,
     failed_turn_id: &str,
@@ -394,6 +399,7 @@ fn git_output_bytes(cwd: &Path, args: &[&str], max_bytes: usize) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 fn rollout_is_idle(lines: &[String]) -> bool {
     let mut busy = false;
     for line in lines {
@@ -418,6 +424,7 @@ fn rollout_is_idle(lines: &[String]) -> bool {
     !busy
 }
 
+#[allow(dead_code)]
 fn touched_files(lines: &[String]) -> Vec<String> {
     let mut files = Vec::new();
     for line in lines.iter().rev().take(200) {
