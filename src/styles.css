@@ -4060,6 +4060,45 @@ button.danger:hover:not(:disabled) {
   width: 12px;
 }
 
+.statusBarQuit {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #aab1bc;
+  display: inline-flex;
+  font-size: 10px;
+  gap: 5px;
+  margin-left: 2px;
+  min-height: 20px;
+  padding: 1px 6px;
+}
+
+.statusBarQuit:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.08);
+  border-color: #4b505a;
+  color: #f1f3f5;
+}
+
+.statusBarQuit:focus-visible {
+  outline: 1px solid #c8cdd4;
+  outline-offset: 1px;
+}
+
+.statusBarQuit svg {
+  height: 12px;
+  width: 12px;
+}
+
+.statusBarQuit kbd {
+  border: 1px solid #454a54;
+  border-radius: 3px;
+  color: #7f8794;
+  font-family: inherit;
+  font-size: 9px;
+  padding: 0 3px;
+}
+
 .statusBarBranch {
   color: #c7cdd6;
   max-width: 34vw;

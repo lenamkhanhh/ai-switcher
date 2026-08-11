@@ -167,6 +167,19 @@ test("Windows persisted-state permissions are explicit instead of a no-op", asyn
   );
 });
 
+test("The workbench exposes a real quit action and Ctrl+Q shortcut", async () => {
+  const app = await read("src/App.tsx");
+  const tauri = await read("src/tauri.ts");
+  const rust = await read("src-tauri/src/lib.rs");
+
+  assert.match(tauri, /quitApp:\s*\(\)\s*=>\s*invoke<void>\("quit_app"\)/);
+  assert.match(rust, /#\[tauri::command\]\s*fn quit_app\(app: tauri::AppHandle\)/s);
+  assert.match(rust, /quit_app,/);
+  assert.match(app, /event\.key\.toLowerCase\(\) === "q"/);
+  assert.match(app, /api\.quitApp\(\)/);
+  assert.match(app, /statusBarQuit/);
+});
+
 test("Codex login prompts finish account-scoped after output is drained", async () => {
   const app = await read("src/App.tsx");
   const lifecycle = await read("src/loginPromptLifecycle.ts");

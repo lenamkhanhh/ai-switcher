@@ -17,6 +17,7 @@ import {
   EyeOff,
   LockKeyhole,
   LogIn,
+  LogOut,
   Minus,
   Pencil,
   Plus,
@@ -345,6 +346,15 @@ export function App() {
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "q" &&
+        !event.repeat
+      ) {
+        event.preventDefault();
+        void api.quitApp().catch(() => {});
+        return;
+      }
       if (event.key !== "F11" || event.repeat) return;
       event.preventDefault();
       void appWindow
@@ -1340,6 +1350,17 @@ export function App() {
         <span className="statusBarSpacer" />
         <span>{currentAutoSwitch.enabled ? `Auto-switch ${currentAutoSwitch.threshold}%` : "Auto-switch off"}</span>
         <span>{version ? `v${version}` : "dev"}</span>
+        <button
+          type="button"
+          className="statusBarQuit"
+          aria-label="Quit AI Account Switcher"
+          title="Quit (Ctrl+Q)"
+          onClick={() => void api.quitApp().catch(() => {})}
+        >
+          <LogOut aria-hidden />
+          <span>Quit</span>
+          <kbd>Ctrl Q</kbd>
+        </button>
       </footer>
 
       {dialog === "add" && currentTool && (

@@ -255,6 +255,9 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
   if (command === "load_snapshot" || command === "refresh_tool" || command === "set_launch_with_windows") {
     return structuredClone(demoSnapshot) as T;
   }
+  if (command === "quit_app") {
+    return undefined as T;
+  }
   if (command === "wake_helper_status" || command === "uninstall_wake_helper") {
     return false as T;
   }
@@ -545,6 +548,7 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
 
 export const api = {
   loadSnapshot: () => invoke<AppSnapshot>("load_snapshot"),
+  quitApp: () => invoke<void>("quit_app"),
   refreshTool: (toolId: ToolId) => invoke<AppSnapshot>("refresh_tool", { toolId }),
   refreshAccount: (toolId: ToolId, accountId: string) =>
     invoke<AppSnapshot>("refresh_account", { toolId, accountId }),

@@ -26,6 +26,13 @@ use models::{
 };
 use tauri::{Emitter, Manager, State};
 
+/// Exit the whole desktop process. The window close button intentionally hides to the tray, so
+/// explicit quit actions must use the application exit path instead of closing the main window.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 fn load_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     // App just opened: update accounts that finished logging in while it was closed.
@@ -460,6 +467,7 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             load_snapshot,
+            quit_app,
             refresh_tool,
             refresh_account,
             reauthenticate_account,
