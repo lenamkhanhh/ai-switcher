@@ -9,8 +9,9 @@ const WS_EX_TRANSPARENT: u64 = 0x20;
 const PET_MIN_DIMENSION: i32 = 120;
 const PET_MAX_DIMENSION: i32 = 700;
 const PET_SAFE_EDGE_MARGIN: i32 = 20;
-const PET_LAYOUT_HEIGHT: i32 = 520;
-const PET_ACTIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+// The renderer owns the pet geometry. A 100 Hz monitor can repeatedly invalidate Windows shell
+// composition when the renderer moves the same overlay, so keep the repair loop deliberately calm.
+const PET_ACTIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 // The pet's activity bubble is laid out above/below the sprite depending on its screen position.
 // Keeping this much room below the overlay prevents Codex from putting the sprite and controls
 // past the bottom of its fixed-size transparent window.
@@ -41,7 +42,7 @@ pub(crate) fn clear_transparent_exstyle(exstyle: u64) -> u64 {
 }
 
 pub(crate) fn pet_layout_height(window_height: i32) -> i32 {
-    window_height.max(PET_LAYOUT_HEIGHT)
+    window_height
 }
 
 pub(crate) fn safe_pet_position(
@@ -319,8 +320,10 @@ mod windows_impl {
         };
         let width = rect.right.saturating_sub(rect.left);
         let window_height = rect.bottom.saturating_sub(rect.top);
-        let desired_height = super::pet_layout_height(window_height);
-        let current = (rect.left, rect.top, width, desired_height);
+        // Preserve the renderer-owned height. Resizing here would fight the renderer on every
+        // polling cycle and can cause visible flicker plus continuous shell composition work.
+        let current_height = super::pet_layout_height(window_height);
+        let current = (rect.left, rect.top, width, current_height);
         let work_area = monitor_work_area(hwnd);
         let target = work_area
             .map(|work| super::safe_pet_position(current, work))
@@ -331,8 +334,7 @@ mod windows_impl {
         let position_changed = work_area
             .map(|work| super::should_reposition_pet(current, work))
             .unwrap_or(false);
-        let size_changed = desired_height != window_height;
-        if !style_changed && !position_changed && !size_changed {
+        if !style_changed && !position_changed {
             return true;
         }
 
