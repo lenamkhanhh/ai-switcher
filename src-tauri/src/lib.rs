@@ -34,10 +34,15 @@ fn quit_app(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn load_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    // App just opened: update accounts that finished logging in while it was closed.
-    let _ = state.recheck_pending_logins();
-    state.snapshot().map_err(display_error)
+async fn load_snapshot(app: tauri::AppHandle) -> Result<AppSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ManagedState>();
+        // App just opened: update accounts that finished logging in while it was closed.
+        let _ = state.recheck_pending_logins();
+        state.snapshot().map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -73,48 +78,71 @@ async fn refresh_account(
 }
 
 #[tauri::command]
-fn reauthenticate_account(
+async fn reauthenticate_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     tool_id: ToolId,
     account_id: String,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state
-        .reauthenticate_account(&app, tool_id, &account_id)
-        .map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .reauthenticate_account(&worker_app, tool_id, &account_id)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn add_account(
-    app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
-    input: AddAccountInput,
-) -> Result<AppSnapshot, String> {
-    let snapshot = state.add_account(&app, input).map_err(display_error)?;
+async fn add_account(app: tauri::AppHandle, input: AddAccountInput) -> Result<AppSnapshot, String> {
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .add_account(&worker_app, input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn import_codex_account(
+async fn import_codex_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     input: ImportCodexAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state.import_codex_account(input).map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .import_codex_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn add_api_account(
+async fn add_api_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     input: AddApiAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state.add_api_account(input).map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .add_api_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
@@ -131,34 +159,50 @@ async fn fetch_gateway_models(base_url: String, api_key: String) -> Result<Vec<S
 }
 
 #[tauri::command]
-fn rename_account(
+async fn rename_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     input: RenameAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state.rename_account(input).map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .rename_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn switch_account(
+async fn switch_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     input: SwitchAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state.switch_account(input).map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .switch_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn retry_resume_job(
-    app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
-    job_id: String,
-) -> Result<AppSnapshot, String> {
-    state.retry_resume_job(&app, &job_id).map_err(display_error)
+async fn retry_resume_job(app: tauri::AppHandle, job_id: String) -> Result<AppSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .retry_resume_job(&app, &job_id)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -175,23 +219,34 @@ fn open_resume_job(state: State<'_, ManagedState>, job_id: String) -> Result<App
 }
 
 #[tauri::command]
-fn set_launcher(
-    state: State<'_, ManagedState>,
+async fn set_launcher(
+    app: tauri::AppHandle,
     input: SetLauncherInput,
 ) -> Result<AppSnapshot, String> {
-    state.set_launcher(input).map_err(display_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .set_launcher(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn delete_account(
+async fn delete_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     tool_id: ToolId,
     account_id: String,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state
-        .delete_account(tool_id, account_id)
-        .map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .delete_account(tool_id, account_id)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
@@ -327,11 +382,17 @@ fn validate_tool_setup(
 }
 
 #[tauri::command]
-fn set_tool_setup(
-    state: State<'_, ManagedState>,
+async fn set_tool_setup(
+    app: tauri::AppHandle,
     input: SetToolSetupInput,
 ) -> Result<AppSnapshot, String> {
-    state.set_tool_setup(input).map_err(display_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<ManagedState>()
+            .set_tool_setup(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Token usage + cost report for the Usage tab (Claude + Codex, aggregated per tool).
@@ -435,14 +496,19 @@ async fn refresh_api_gateway_models(app: tauri::AppHandle) -> Result<AppSnapshot
 }
 
 #[tauri::command]
-fn create_virtual_api_account(
+async fn create_virtual_api_account(
     app: tauri::AppHandle,
-    state: State<'_, ManagedState>,
     input: CreateVirtualApiAccountInput,
 ) -> Result<AppSnapshot, String> {
-    let snapshot = state
-        .create_virtual_api_account(input)
-        .map_err(display_error)?;
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .create_virtual_api_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     tray::rebuild(&app);
     Ok(snapshot)
 }
