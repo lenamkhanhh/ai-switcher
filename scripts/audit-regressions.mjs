@@ -8,17 +8,32 @@ test("heavy Tauri commands are async and move blocking work off the UI thread", 
   const source = await read("src-tauri/src/lib.rs");
 
   for (const command of [
+    "load_snapshot",
+    "reauthenticate_account",
+    "add_account",
+    "import_codex_account",
+    "add_api_account",
     "fetch_gateway_models",
+    "rename_account",
+    "switch_account",
+    "retry_resume_job",
+    "set_launcher",
+    "delete_account",
     "get_usage",
+    "set_tool_setup",
+    "create_virtual_api_account",
     "stop_api_gateway",
     "initialize_vault",
     "unlock_vault",
   ]) {
-    assert.match(source, new RegExp(`async\\s+fn\\s+${command}\\s*\\(`));
-  }
+    const start = source.search(new RegExp(`(?:async\\s+)?fn\\s+${command}\\s*\\(`));
+    assert.ok(start >= 0, `${command} command must exist`);
+    const nextCommand = source.indexOf("#[tauri::command]", start);
+    const body = source.slice(start, nextCommand >= 0 ? nextCommand : source.length);
 
-  const blockingCalls = source.match(/spawn_blocking/g) ?? [];
-  assert.ok(blockingCalls.length >= 6, "blocking commands should use spawn_blocking");
+    assert.match(body, new RegExp(`^async\\s+fn\\s+${command}\\s*\\(`));
+    assert.match(body, /tauri::async_runtime::spawn_blocking/);
+  }
 });
 
 test("gateway health response exposes readiness only", async () => {
