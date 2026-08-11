@@ -878,9 +878,7 @@ fn persist_member_state(
                 });
         }
     }) {
-        eprintln!(
-            "AI Account Switcher: couldn't persist API gateway runtime state: {error:#}"
-        );
+        eprintln!("AI Account Switcher: couldn't persist API gateway runtime state: {error:#}");
     }
 }
 
@@ -910,7 +908,10 @@ fn should_retry_upstream(status: reqwest::StatusCode) -> bool {
 /// content parts of `type:"text"`. They must become `function_call_output`, `function_call`, and
 /// `input_text` items respectively.
 fn chat_message_to_responses_items(message: &Value) -> Vec<Value> {
-    let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
     let mut items = Vec::new();
 
     // A tool result: `{role:"tool", tool_call_id, content}` → function_call_output.
@@ -3347,7 +3348,10 @@ mod tests {
         );
         let out = sniffer.push_translate(sse.as_bytes());
 
-        assert!(out.contains("Hello"), "the incremental delta must be forwarded");
+        assert!(
+            out.contains("Hello"),
+            "the incremental delta must be forwarded"
+        );
         assert!(
             !out.contains("Hello world"),
             "output_text.done must not re-emit the full answer: {out}"
@@ -3415,10 +3419,17 @@ mod tests {
             ]
         }));
         let messages = out["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2, "the reasoning item must be dropped: {messages:?}");
-        assert!(messages.iter().all(|m| {
-            m["content"].as_str().map(|s| !s.is_empty()).unwrap_or(true)
-        }), "no empty-content message may reach Anthropic: {messages:?}");
+        assert_eq!(
+            messages.len(),
+            2,
+            "the reasoning item must be dropped: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| { m["content"].as_str().map(|s| !s.is_empty()).unwrap_or(true) }),
+            "no empty-content message may reach Anthropic: {messages:?}"
+        );
     }
 
     #[test]
@@ -3846,7 +3857,10 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         assert_eq!(fc["arguments"], "{\"city\":\"Hanoi\"}");
 
         // tool result → function_call_output
-        let fco = input.iter().find(|i| i["type"] == "function_call_output").unwrap();
+        let fco = input
+            .iter()
+            .find(|i| i["type"] == "function_call_output")
+            .unwrap();
         assert_eq!(fco["call_id"], "call_1");
         assert_eq!(fco["output"], "sunny");
 

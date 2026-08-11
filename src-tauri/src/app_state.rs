@@ -21,15 +21,13 @@ use crate::tools::{
     antigravity_quit_ide, antigravity_restore, antigravity_saved_profile, antigravity_saved_token,
     clear_active_profile, create_profile_with_default, current_platform, default_config_dir,
     delete_account_files, finalize_staged_account_files, full_launcher_name, install_shell_hook,
-    is_installed,
-    launch_profile_login, launcher_name_collides_with_system, launcher_paths,
-    link_shared_config_to, link_shared_sessions_to, refresh_codex_frontends_after_switch,
-    is_codex_imported_session, mark_codex_imported_session, remove_launcher,
-    restart_codex_runtime_after_switch, sync_codex_ide_credentials,
-    restore_staged_account_files, stage_account_files, sync_reauthenticated_codex_credentials,
-    write_active_profile, write_api_key_file,
-    write_api_launcher, write_claude_proxy_settings, write_codex_auth, write_codex_proxy_config,
-    write_launcher,
+    is_codex_imported_session, is_installed, launch_profile_login,
+    launcher_name_collides_with_system, launcher_paths, link_shared_config_to,
+    link_shared_sessions_to, mark_codex_imported_session, refresh_codex_frontends_after_switch,
+    remove_launcher, restart_codex_runtime_after_switch, restore_staged_account_files,
+    stage_account_files, sync_codex_ide_credentials, sync_reauthenticated_codex_credentials,
+    write_active_profile, write_api_key_file, write_api_launcher, write_claude_proxy_settings,
+    write_codex_auth, write_codex_proxy_config, write_launcher,
 };
 use crate::vault::VaultService;
 use anyhow::{Context, Result};
@@ -2618,8 +2616,7 @@ impl ManagedState {
                 } else {
                     self.store.account_dir(&tool_id, &account.id)
                 };
-                crate::tools::codex_auth_account_id(&config_dir.join("auth.json"))
-                    .as_deref()
+                crate::tools::codex_auth_account_id(&config_dir.join("auth.json")).as_deref()
                     == Some(session.account_id.as_str())
             });
             if duplicate {
@@ -2635,13 +2632,8 @@ impl ManagedState {
             let _ = delete_account_files(&tool_id, &self.store, &id);
             return Err(error).context("Couldn't install imported Codex credentials");
         }
-        if let Err(error) = write_launcher(
-            &tool_id,
-            &self.store,
-            &id,
-            &full_launcher,
-            &binary_path,
-        ) {
+        if let Err(error) = write_launcher(&tool_id, &self.store, &id, &full_launcher, &binary_path)
+        {
             remove_launcher(&full_launcher);
             let _ = delete_account_files(&tool_id, &self.store, &id);
             return Err(error).context("Couldn't create the account's custom command");
@@ -2669,7 +2661,10 @@ impl ManagedState {
             launcher_command: Some(full_launcher.clone()),
             is_default: false,
             avatar_url: None,
-            account_email: session.email.clone().or_else(|| codex_account_email(&profile)),
+            account_email: session
+                .email
+                .clone()
+                .or_else(|| codex_account_email(&profile)),
             api_provider: None,
             launcher_paths: None,
             quota_status: None,
@@ -3238,7 +3233,9 @@ impl ManagedState {
                 rollback_errors.push(format!("state: {rollback_error}"));
             }
             if let Some(credential) = original_credential.as_ref() {
-                if let Err(rollback_error) = self.vault.save(vault_input_from_credential(credential)) {
+                if let Err(rollback_error) =
+                    self.vault.save(vault_input_from_credential(credential))
+                {
                     rollback_errors.push(format!("vault: {rollback_error}"));
                 }
             }
@@ -3250,12 +3247,9 @@ impl ManagedState {
                 }
             }
             if let Some(staged_path) = staged.as_deref() {
-                if let Err(rollback_error) = restore_staged_account_files(
-                    &tool_id,
-                    &self.store,
-                    &account_id,
-                    staged_path,
-                ) {
+                if let Err(rollback_error) =
+                    restore_staged_account_files(&tool_id, &self.store, &account_id, staged_path)
+                {
                     rollback_errors.push(format!("account files: {rollback_error}"));
                 }
             }
@@ -3273,12 +3267,14 @@ impl ManagedState {
         next_data
             .accounts
             .retain(|account| !(account.tool_id == tool_id && account.id == account_id));
-        next_data.api_gateway.accounts.retain(|entry| {
-            !(entry.tool_id == tool_id && entry.account_id == account_id)
-        });
-        next_data.api_gateway.model_registry.retain(|entry| {
-            !(entry.tool_id == tool_id && entry.account_id == account_id)
-        });
+        next_data
+            .api_gateway
+            .accounts
+            .retain(|entry| !(entry.tool_id == tool_id && entry.account_id == account_id));
+        next_data
+            .api_gateway
+            .model_registry
+            .retain(|entry| !(entry.tool_id == tool_id && entry.account_id == account_id));
         next_data.auto_prime.remove(&account_id);
         next_data.auto_ping.remove(&account_id);
 
@@ -3295,7 +3291,9 @@ impl ManagedState {
             if let Err(error) = clear_active_profile(&tool_id, &self.store)
                 .and_then(|_| install_shell_hook(&self.store))
             {
-                return rollback(error.context("Couldn't clear the deleted account's active profile"));
+                return rollback(
+                    error.context("Couldn't clear the deleted account's active profile"),
+                );
             }
         }
 
@@ -3303,12 +3301,9 @@ impl ManagedState {
             remove_launcher(&name);
         }
         if let Some(staged_path) = staged.as_deref() {
-            if let Err(error) = finalize_staged_account_files(
-                &tool_id,
-                &self.store,
-                &account_id,
-                staged_path,
-            ) {
+            if let Err(error) =
+                finalize_staged_account_files(&tool_id, &self.store, &account_id, staged_path)
+            {
                 return rollback(error.context("Couldn't finalize account deletion"));
             }
         } else {
@@ -4439,10 +4434,8 @@ mod tests {
                 test_resume_job(&format!("job-{index}"), status)
             })
             .collect();
-        data.resume_jobs.push(test_resume_job(
-            "active",
-            ResumeJobStatus::Monitoring,
-        ));
+        data.resume_jobs
+            .push(test_resume_job("active", ResumeJobStatus::Monitoring));
 
         migrate_resume_jobs(&mut data);
 
@@ -4456,7 +4449,10 @@ mod tests {
         );
         assert!(data.resume_jobs.len() <= 21);
         assert!(data.resume_jobs.iter().all(|job| {
-            !matches!(job.status, ResumeJobStatus::Resumed | ResumeJobStatus::Failed)
+            !matches!(
+                job.status,
+                ResumeJobStatus::Resumed | ResumeJobStatus::Failed
+            )
         }));
     }
 
@@ -4708,7 +4704,8 @@ mod tests {
 
     #[test]
     fn startup_migration_promotes_k12_import_to_browser_subscription_login() {
-        let root = std::env::temp_dir().join(format!("aisw-k12-migration-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("aisw-k12-migration-{}", uuid::Uuid::new_v4()));
         let store = Store::for_test(root.clone()).unwrap();
         let profile = store.account_dir(&ToolId::Codex, "k12");
         std::fs::create_dir_all(&profile).unwrap();

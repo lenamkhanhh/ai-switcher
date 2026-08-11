@@ -361,7 +361,9 @@ fn cleanup_stale_state_staging_files(root: &std::path::Path) -> Result<()> {
             match fs::remove_file(entry.path()) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context("Couldn't remove stale state staging file"),
+                Err(error) => {
+                    return Err(error).context("Couldn't remove stale state staging file")
+                }
             }
         }
     }

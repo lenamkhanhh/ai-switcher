@@ -49,7 +49,6 @@ pub fn read_quota(tool_id: &ToolId, config_dir: &Path) -> QuotaInfo {
 static CLAUDE_CACHE: Mutex<BTreeMap<String, (Instant, QuotaInfo)>> = Mutex::new(BTreeMap::new());
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60);
 
-
 fn read_claude_quota(config_dir: &Path) -> Result<QuotaInfo> {
     let cache_key = config_dir.to_string_lossy().to_string();
     if let Ok(guard) = CLAUDE_CACHE.lock() {
