@@ -252,3 +252,12 @@ test("Recovery banners are dismissible and expired accounts are labelled truthfu
   assert.match(app, /title="Dismiss recovery"/);
   assert.match(app, /api\.cancelResumeJob\(visibleRecoveryJob\.id\)/);
 });
+
+test("Windows persistence helpers never open console windows", async () => {
+  const store = await read("src-tauri/src/store.rs");
+
+  assert.match(store, /fn hidden_windows_command\(/);
+  assert.match(store, /hidden_windows_command\(windows_system_binary\("whoami\.exe"\)\?\)/);
+  assert.match(store, /hidden_windows_command\(windows_system_binary\("icacls\.exe"\)\?\)/);
+  assert.match(store, /creation_flags\(CREATE_NO_WINDOW\)/);
+});
