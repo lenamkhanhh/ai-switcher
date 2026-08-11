@@ -415,9 +415,11 @@ pub(crate) fn start_pet_input_monitor() {}
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         clear_transparent_exstyle, is_codex_pet_window, pet_layout_height, safe_pet_position,
-        should_reposition_pet,
+        should_reposition_pet, PET_ACTIVE_POLL_INTERVAL,
     };
 
     #[test]
@@ -492,9 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn expands_only_the_native_overlay_client_height() {
-        assert_eq!(pet_layout_height(400), 520);
+    fn preserves_the_renderer_owned_overlay_height() {
+        assert_eq!(pet_layout_height(400), 400);
         assert_eq!(pet_layout_height(540), 540);
+    }
+
+    #[test]
+    fn active_monitor_does_not_poll_at_shell_thrashing_frequency() {
+        assert!(PET_ACTIVE_POLL_INTERVAL >= Duration::from_millis(100));
     }
 
     #[test]
