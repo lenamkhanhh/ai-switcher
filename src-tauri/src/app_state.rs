@@ -4378,6 +4378,56 @@ fn local_time_label_from_iso(iso: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_resume_job(id: &str, status: ResumeJobStatus) -> ResumeJob {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "sessionId": "session",
+            "eventKey": id,
+            "cwd": "C:\\workspace",
+            "fromAccountId": "acc1",
+            "checkpointPath": "",
+            "status": serde_json::to_value(status).unwrap(),
+            "createdAt": "2026-07-01T00:00:00Z",
+            "updatedAt": "2026-07-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn startup_migration_retires_legacy_recovery_noise_and_bounds_history() {
+        let mut data = StoredState::default();
+        data.schema_version = 3;
+        data.resume_jobs = (0..30)
+            .map(|index| {
+                let status = if index % 2 == 0 {
+                    ResumeJobStatus::Resumed
+                } else {
+                    ResumeJobStatus::Failed
+                };
+                test_resume_job(&format!("job-{index}"), status)
+            })
+            .collect();
+        data.resume_jobs.push(test_resume_job(
+            "active",
+            ResumeJobStatus::Monitoring,
+        ));
+
+        migrate_resume_jobs(&mut data);
+
+        assert_eq!(data.schema_version, 4);
+        assert_eq!(
+            data.resume_jobs
+                .iter()
+                .filter(|job| job.status == ResumeJobStatus::Monitoring)
+                .count(),
+            1
+        );
+        assert!(data.resume_jobs.len() <= 21);
+        assert!(data.resume_jobs.iter().all(|job| {
+            !matches!(job.status, ResumeJobStatus::Resumed | ResumeJobStatus::Failed)
+        }));
+    }
+
     #[test]
     fn codex_subscription_switch_reloads_the_ide_without_killing_its_app_server() {
         let plan = switch_runtime_plan(&ToolId::Codex, false);

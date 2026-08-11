@@ -243,3 +243,12 @@ test("Settings formats CLI paths for display without mutating stored setup paths
   );
   assert.match(formatter, /compact\.slice\(-\(maxLength - 1\)\)/);
 });
+
+test("Recovery banners are dismissible and expired accounts are labelled truthfully", async () => {
+  const app = await read("src/App.tsx");
+
+  assert.match(app, /if \(state === "needsLogin"\) return "Needs login";/);
+  assert.doesNotMatch(app, /if \(state === "needsLogin"\) return "Signing in";/);
+  assert.match(app, /title="Dismiss recovery"/);
+  assert.match(app, /api\.cancelResumeJob\(visibleRecoveryJob\.id\)/);
+});

@@ -394,6 +394,22 @@ mod tests {
         Store::for_test(root).unwrap()
     }
 
+    #[test]
+    fn startup_cleanup_removes_only_abandoned_state_staging_files() {
+        let store = temp_store("stale-stage");
+        let root = store.root_dir();
+        let stale = root.join("state.json.tmp12345");
+        let unrelated = root.join("state.json.tmp-not-a-process");
+        fs::write(&stale, b"stale").unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_stale_state_staging_files(root).unwrap();
+
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// A crash mid-write must not cost the user every account: the previous good state is kept
     /// alongside and used when `state.json` no longer parses.
     #[test]

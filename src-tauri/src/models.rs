@@ -1157,3 +1157,16 @@ pub struct UsageReports {
     /// Fixed all-time source used to render the intentional 53-week activity calendar.
     pub activity_report: UsageReport,
 }
+
+#[cfg(test)]
+mod resume_job_status_tests {
+    use super::ResumeJobStatus;
+
+    #[test]
+    fn legacy_resumed_jobs_are_terminal_and_failed_jobs_can_be_dismissed() {
+        assert!(ResumeJobStatus::Resumed.is_terminal());
+        assert!(ResumeJobStatus::Failed.is_dismissible());
+        assert!(ResumeJobStatus::NeedsAttention.is_dismissible());
+        assert!(!ResumeJobStatus::Completed.is_dismissible());
+    }
+}
