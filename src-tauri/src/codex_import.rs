@@ -1,12 +1,16 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum size accepted for a K12 export. The supported export is a small JSON wrapper; keeping
 /// this bounded prevents an accidental multi-gigabyte paste from becoming an IPC/memory issue.
 pub(crate) const MAX_IMPORT_BYTES: usize = 5 * 1024 * 1024;
+/// Bound one user-supplied batch so a malformed export cannot allocate an
+/// unbounded number of profiles or launchers in one IPC call.
+pub(crate) const MAX_BULK_ACCOUNTS: usize = 100;
 
 /// The only credential fields Codex needs. Secrets are wrapped in `Zeroizing` so the parsed
 /// session does not linger in memory after the import operation returns.
@@ -54,6 +58,18 @@ impl Drop for K12Credentials {
 }
 
 pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
+    let mut sessions = parse_k12_export_batch(raw)?;
+    if sessions.len() != 1 {
+        bail!("K12 export must contain exactly one account");
+    }
+    Ok(sessions.remove(0))
+}
+
+/// Parse a K12 export containing one or more OpenAI OAuth accounts.
+///
+/// The returned values contain only the four fields required by Codex. The
+/// caller owns the zeroizing buffers and must not persist the raw export.
+pub(crate) fn parse_k12_export_batch(raw: &str) -> Result<Vec<ImportedCodexSession>> {
     if raw.len() > MAX_IMPORT_BYTES {
         bail!("Session file is too large (maximum is 5 MB)");
     }
@@ -62,11 +78,26 @@ pub(crate) fn parse_k12_export(raw: &str) -> Result<ImportedCodexSession> {
     let export: K12Export = serde_json::from_str(raw).map_err(|error| {
         anyhow::anyhow!("Session file does not match the K12 export format: {error}")
     })?;
-    if export.accounts.len() != 1 {
-        bail!("K12 export must contain exactly one account");
+    if export.accounts.is_empty() {
+        bail!("K12 export must contain at least one account");
+    }
+    if export.accounts.len() > MAX_BULK_ACCOUNTS {
+        bail!("K12 export contains too many accounts (maximum is {MAX_BULK_ACCOUNTS})");
     }
 
-    let account = &export.accounts[0];
+    let mut account_ids = HashSet::with_capacity(export.accounts.len());
+    let mut sessions = Vec::with_capacity(export.accounts.len());
+    for account in export.accounts {
+        let session = parse_k12_account(account)?;
+        if !account_ids.insert(session.account_id.clone()) {
+            bail!("K12 export contains duplicate account id");
+        }
+        sessions.push(session);
+    }
+    Ok(sessions)
+}
+
+fn parse_k12_account(account: K12Account) -> Result<ImportedCodexSession> {
     if !account.platform.eq_ignore_ascii_case("openai")
         && !account.platform.eq_ignore_ascii_case("codex")
     {
@@ -262,7 +293,10 @@ mod tests {
             "          }, {\n            \"platform\": \"openai\",\n            \"type\": \"oauth\",\n            \"credentials\": {\n              \"access_token\": \"access-token-2\",\n              \"refresh_token\": \"refresh-token-2\",\n              \"id_token\": \"id-token-2\",\n              \"chatgpt_account_id\": \"11111111-1111-4111-8111-111111111111\"\n            }\n          }]\n        }",
         );
 
-        let error = parse_k12_export_batch(&export).expect_err("duplicate account ids must fail");
+        let error = match parse_k12_export_batch(&export) {
+            Ok(_) => panic!("duplicate account ids must fail"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("duplicate"));
     }
 }
