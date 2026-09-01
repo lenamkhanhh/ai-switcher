@@ -2,17 +2,18 @@ use crate::codex_app_server::{
     classify_terminal_turn, recovery_error_message, terminal_error_fingerprint, AppServerConfig,
     CodexAppServerClient,
 };
-use crate::codex_import::{codex_auth_json, parse_k12_export};
+use crate::codex_import::{codex_auth_json, parse_k12_export, parse_k12_export_batch};
 use crate::models::{
     Account, AccountState, AddAccountInput, AddApiAccountInput, ApiGatewayAccount, ApiGatewayCombo,
     ApiGatewayConfig, ApiGatewayKey, ApiGatewayServerState, ApiGatewaySnapshot, ApiProvider,
-    ApiUsageReport, AppSnapshot, AutoSwitchSetting, CodexLoginMethod, CreateApiGatewayKeyInput,
-    CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
-    DeleteApiGatewayKeyInput, DetectionReport, GoalSnapshot, ImportCodexAccountInput, QuotaInfo,
-    RecoveryErrorKind, RecoveryPlanStep, RecoveryRuntimeSnapshot, RenameAccountInput, ResumeJob,
-    ResumeJobStatus, SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput,
-    SetToolSetupInput, StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport,
-    UsageReports, VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
+    ApiUsageReport, AppSnapshot, AutoSwitchSetting, BulkImportCodexAccountsInput, CodexLoginMethod,
+    CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
+    DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport, GoalSnapshot,
+    ImportCodexAccountInput, QuotaInfo, RecoveryErrorKind, RecoveryPlanStep,
+    RecoveryRuntimeSnapshot, RenameAccountInput, ResumeJob, ResumeJobStatus,
+    SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
+    StartApiGatewayInput, SwitchAccountInput, ToolId, ToolStatus, UsageReport, UsageReports,
+    VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
 };
 use crate::quota::{codex_account_email, read_quota};
 use crate::store::{normalize_account_states, Store, StoredState};
@@ -32,7 +33,7 @@ use crate::tools::{
 use crate::vault::VaultService;
 use anyhow::{Context, Result};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -2697,6 +2698,216 @@ impl ManagedState {
         self.snapshot()
     }
 
+    /// Import a K12 OAuth export containing multiple Codex subscription accounts.
+    ///
+    /// Profiles and launchers are staged first; `state.json` is committed only
+    /// after every new profile has been written successfully. Imported
+    /// accounts are enrolled in the local API gateway pool in the same state
+    /// commit, so a single bulk import is immediately represented in both the
+    /// native account list and the pool membership list.
+    pub fn import_codex_accounts_bulk(
+        &self,
+        mut input: BulkImportCodexAccountsInput,
+    ) -> Result<AppSnapshot> {
+        let tool_id = ToolId::Codex;
+        let mut raw_session = zeroize::Zeroizing::new(std::mem::take(&mut input.session_json));
+        let session_result = parse_k12_export_batch(&raw_session);
+        raw_session.zeroize();
+        let sessions = session_result?;
+        let name_prefix = bulk_prefix(input.name_prefix.as_deref(), "acc", "Account name prefix")?;
+        let launcher_prefix =
+            bulk_prefix(input.launcher_prefix.as_deref(), "bulk-", "Launcher prefix")?;
+
+        let (default_dir, binary_path, existing_account_ids) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let default_dir = configured_default_config_dir(&data, &tool_id)
+                .unwrap_or_else(|| default_config_dir(&tool_id));
+            let binary_path = configured_binary_path(&data, &tool_id)
+                .context("CLI setup is ambiguous — choose the Codex binary first")?;
+            let existing_account_ids = data
+                .accounts
+                .iter()
+                .filter(|account| account.tool_id == tool_id && account.api_provider.is_none())
+                .filter_map(|account| {
+                    let config_dir = if account.is_default {
+                        default_dir.clone()
+                    } else {
+                        self.store.account_dir(&tool_id, &account.id)
+                    };
+                    crate::tools::codex_auth_account_id(&config_dir.join("auth.json"))
+                })
+                .collect::<HashSet<_>>();
+            (default_dir, binary_path, existing_account_ids)
+        };
+
+        let mut staged_files: Vec<(String, String)> = Vec::new();
+        let mut imported_accounts = Vec::new();
+        let mut imported_profile_ids = Vec::new();
+        let mut imported_provider_ids = Vec::new();
+        let mut reserved_names = HashSet::new();
+        let mut reserved_launchers = HashSet::new();
+        let mut next_label = 1_usize;
+
+        let cleanup = |files: &[(String, String)]| {
+            for (account_id, launcher) in files {
+                remove_launcher(launcher);
+                let _ = delete_account_files(&tool_id, &self.store, account_id);
+            }
+        };
+
+        for session in sessions {
+            // Re-running the same export is safe: already-known provider
+            // accounts are skipped instead of producing duplicate profiles.
+            if existing_account_ids.contains(&session.account_id) {
+                continue;
+            }
+
+            let id = Uuid::new_v4().to_string();
+            let (name, full_launcher) = match next_bulk_account_labels(
+                &self.data,
+                &name_prefix,
+                &launcher_prefix,
+                &mut next_label,
+                &mut reserved_names,
+                &mut reserved_launchers,
+            ) {
+                Ok(labels) => labels,
+                Err(error) => {
+                    cleanup(&staged_files);
+                    return Err(error);
+                }
+            };
+            let auth_json = match codex_auth_json(&session) {
+                Ok(auth_json) => auth_json,
+                Err(error) => {
+                    cleanup(&staged_files);
+                    return Err(error);
+                }
+            };
+            let profile =
+                match create_profile_with_default(&tool_id, &self.store, &id, &default_dir) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        cleanup(&staged_files);
+                        return Err(error.context("Couldn't create an imported Codex profile"));
+                    }
+                };
+            link_shared_config_to(&tool_id, &profile, &default_dir);
+
+            if let Err(error) = write_codex_auth(&profile, &auth_json) {
+                cleanup(&staged_files);
+                let _ = delete_account_files(&tool_id, &self.store, &id);
+                return Err(error).context("Couldn't install imported Codex credentials");
+            }
+            if let Err(error) =
+                write_launcher(&tool_id, &self.store, &id, &full_launcher, &binary_path)
+            {
+                cleanup(&staged_files);
+                let _ = delete_account_files(&tool_id, &self.store, &id);
+                return Err(error).context("Couldn't create an imported Codex command");
+            }
+            crate::tools::seed_onboarding(&tool_id, &profile);
+            if let Err(error) = mark_codex_imported_session(&profile) {
+                remove_launcher(&full_launcher);
+                cleanup(&staged_files);
+                let _ = delete_account_files(&tool_id, &self.store, &id);
+                return Err(error).context("Couldn't mark the imported Codex profile");
+            }
+
+            let timestamp = now();
+            let fingerprint = format!("profile:{id}");
+            imported_provider_ids.push(session.account_id.clone());
+            imported_profile_ids.push(id.clone());
+            staged_files.push((id.clone(), full_launcher.clone()));
+            imported_accounts.push(Account {
+                id,
+                tool_id: tool_id.clone(),
+                name,
+                state: AccountState::Idle,
+                fingerprint,
+                created_at: timestamp.clone(),
+                updated_at: timestamp,
+                last_used_at: None,
+                quota: Some(QuotaInfo::with_message(
+                    "Imported session — click Refresh to read quota",
+                )),
+                launcher_command: Some(full_launcher),
+                is_default: false,
+                avatar_url: None,
+                account_email: session
+                    .email
+                    .clone()
+                    .or_else(|| codex_account_email(&profile)),
+                api_provider: None,
+                launcher_paths: None,
+                quota_status: None,
+                codex_login_method: CodexLoginMethod::BrowserProfile,
+            });
+        }
+
+        if imported_accounts.is_empty() {
+            anyhow::bail!("All accounts in this export are already saved");
+        }
+
+        let save_result = {
+            let mut data = self
+                .data
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let original_data = data.clone();
+            // A concurrent import may have landed while profiles were being
+            // staged. Do not commit a second profile for the same provider id.
+            let current_ids = data
+                .accounts
+                .iter()
+                .filter(|account| account.tool_id == tool_id && account.api_provider.is_none())
+                .filter_map(|account| {
+                    let config_dir = if account.is_default {
+                        default_dir.clone()
+                    } else {
+                        self.store.account_dir(&tool_id, &account.id)
+                    };
+                    crate::tools::codex_auth_account_id(&config_dir.join("auth.json"))
+                })
+                .collect::<HashSet<_>>();
+            let imported_provider_id_set = imported_provider_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            if current_ids
+                .intersection(&imported_provider_id_set)
+                .next()
+                .is_none()
+            {
+                data.accounts.extend(imported_accounts);
+                crate::api_gateway::enroll_codex_accounts(
+                    &mut data.api_gateway,
+                    imported_profile_ids.iter(),
+                );
+                match self.store.save(&data) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        *data = original_data;
+                        Err(error)
+                    }
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "Codex account state changed while importing; nothing was committed"
+                ))
+            }
+        };
+        if let Err(error) = save_result {
+            cleanup(&staged_files);
+            return Err(error).context("Couldn't save the imported Codex accounts");
+        }
+
+        self.snapshot()
+    }
+
     /// Save the Antigravity IDE account currently logged in: capture the token from the default
     /// state.vscdb. The user must ensure the IDE is logged into the exact account they want to save.
     fn create_antigravity_account(&self, input: AddAccountInput) -> Result<AppSnapshot> {
@@ -4203,6 +4414,74 @@ fn validate_name(
     Ok(())
 }
 
+fn bulk_prefix(raw: Option<&str>, fallback: &str, label: &str) -> Result<String> {
+    let value = raw.unwrap_or(fallback).trim().to_ascii_lowercase();
+    if value.is_empty() {
+        anyhow::bail!("{label} cannot be empty");
+    }
+    if value.chars().count() > 16 {
+        anyhow::bail!("{label} is limited to 16 characters");
+    }
+    if !value.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '-' | '_')
+    }) {
+        anyhow::bail!("{label} may only contain lowercase a-z, digits, - or _");
+    }
+    Ok(value)
+}
+
+/// Allocate one deterministic display name and command for a bulk import.
+///
+/// A single sequence is used for both labels so the resulting account list
+/// stays naturally ordered (`acc2` before `acc10`). Existing names/commands
+/// and system binaries are skipped without overwriting them.
+fn next_bulk_account_labels(
+    data: &Mutex<StoredState>,
+    name_prefix: &str,
+    launcher_prefix: &str,
+    next_label: &mut usize,
+    reserved_names: &mut HashSet<String>,
+    reserved_launchers: &mut HashSet<String>,
+) -> Result<(String, String)> {
+    let data = data
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    loop {
+        let suffix = next_label.to_string();
+        *next_label = next_label.saturating_add(1);
+        let name = format!("{name_prefix}{suffix}");
+        if name.chars().count() > 20 {
+            anyhow::bail!("Generated account name is too long; use a shorter name prefix");
+        }
+        if reserved_names.contains(&name)
+            || data
+                .accounts
+                .iter()
+                .any(|account| account.tool_id == ToolId::Codex && account.name == name)
+        {
+            continue;
+        }
+
+        let full_launcher =
+            full_launcher_name(&ToolId::Codex, &format!("{launcher_prefix}{suffix}"))?;
+        if reserved_launchers.contains(&full_launcher)
+            || data.accounts.iter().any(|account| {
+                account.tool_id == ToolId::Codex
+                    && account.launcher_command.as_deref() == Some(full_launcher.as_str())
+            })
+            || launcher_name_collides_with_system(&full_launcher)
+        {
+            continue;
+        }
+
+        reserved_names.insert(name.clone());
+        reserved_launchers.insert(full_launcher.clone());
+        return Ok((name, full_launcher));
+    }
+}
+
 fn virtual_api_name(tool_id: &ToolId) -> &'static str {
     match tool_id {
         ToolId::Claude => "claude-api",
@@ -4407,6 +4686,53 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
+
+    #[test]
+    fn bulk_prefixes_are_normalized_and_reject_unsafe_values() {
+        assert_eq!(
+            bulk_prefix(Some("  Batch_"), "acc", "prefix").unwrap(),
+            "batch_"
+        );
+        let error = match bulk_prefix(Some("batch name"), "acc", "prefix") {
+            Ok(_) => panic!("spaces must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("lowercase"));
+    }
+
+    #[test]
+    fn bulk_labels_skip_existing_names_and_commands() {
+        let mut data = StoredState::default();
+        data.accounts.push(Account {
+            id: "existing".into(),
+            tool_id: ToolId::Codex,
+            name: "acc1".into(),
+            state: AccountState::Idle,
+            fingerprint: "profile:existing".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_used_at: None,
+            launcher_command: Some("codex-bulk-1".into()),
+            launcher_paths: None,
+            is_default: false,
+            avatar_url: None,
+            account_email: None,
+            api_provider: None,
+            quota_status: None,
+            codex_login_method: CodexLoginMethod::BrowserProfile,
+            quota: None,
+        });
+        let data = Mutex::new(data);
+        let mut next = 1;
+        let mut names = HashSet::new();
+        let mut launchers = HashSet::new();
+
+        let (name, launcher) =
+            next_bulk_account_labels(&data, "acc", "bulk-", &mut next, &mut names, &mut launchers)
+                .expect("next safe bulk labels");
+        assert_eq!(name, "acc2");
+        assert_eq!(launcher, "codex-bulk-2");
+    }
 
     fn test_resume_job(id: &str, status: ResumeJobStatus) -> ResumeJob {
         serde_json::from_value(serde_json::json!({

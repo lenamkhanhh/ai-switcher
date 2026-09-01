@@ -5,6 +5,7 @@ import type {
   AddApiAccountInput,
   ApiUsageReport,
   AppSnapshot,
+  BulkImportCodexAccountsInput,
   DetectionReport,
   ImportCodexAccountInput,
   RenameAccountInput,
@@ -533,6 +534,40 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
     }
     return structuredClone(demoSnapshot) as T;
   }
+  if (command === "bulk_import_codex_accounts") {
+    const input = args?.input as BulkImportCodexAccountsInput | undefined;
+    const tool = demoSnapshot.tools.find((item) => item.id === "codex");
+    const prefix = (input?.namePrefix || "acc").trim() || "acc";
+    const launcherPrefix = (input?.launcherPrefix || "bulk-").trim() || "bulk-";
+    if (tool) {
+      for (let index = 1; index <= 2; index += 1) {
+        const name = `${prefix}${index}`;
+        if (tool.accounts.some((account) => account.name === name)) continue;
+        const id = crypto.randomUUID();
+        tool.accounts.push({
+          id,
+          toolId: "codex",
+          name,
+          state: "idle",
+          fingerprint: `profile:demo-bulk-${index}`,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastUsedAt: null,
+          quota: quota(null, null, "Imported session — click Refresh to read quota"),
+          launcherCommand: `codex-${launcherPrefix}${index}`,
+          isDefault: false,
+          codexLoginMethod: "browserProfile",
+        });
+        demoSnapshot.apiGateway.config.accounts.push({
+          toolId: "codex",
+          accountId: id,
+          enabled: true,
+          state: "available",
+        });
+      }
+    }
+    return structuredClone(demoSnapshot) as T;
+  }
   if (command === "accept_disclaimer") {
     demoSnapshot.disclaimerAccepted = true;
     return structuredClone(demoSnapshot) as T;
@@ -557,6 +592,8 @@ export const api = {
   addAccount: (input: AddAccountInput) => invoke<AppSnapshot>("add_account", { input }),
   importCodexAccount: (input: ImportCodexAccountInput) =>
     invoke<AppSnapshot>("import_codex_account", { input }),
+  bulkImportCodexAccounts: (input: BulkImportCodexAccountsInput) =>
+    invoke<AppSnapshot>("bulk_import_codex_accounts", { input }),
   addApiAccount: (input: AddApiAccountInput) => invoke<AppSnapshot>("add_api_account", { input }),
   fetchGatewayModels: (baseUrl: string, apiKey: string) =>
     invoke<string[]>("fetch_gateway_models", { baseUrl, apiKey }),

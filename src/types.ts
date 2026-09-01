@@ -357,6 +357,12 @@ export interface ImportCodexAccountInput {
   sessionJson: string;
 }
 
+export interface BulkImportCodexAccountsInput {
+  sessionJson: string;
+  namePrefix?: string;
+  launcherPrefix?: string;
+}
+
 export interface VaultStatus {
   configured: boolean;
   unlocked: boolean;

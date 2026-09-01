@@ -17,12 +17,12 @@ mod vault;
 
 use app_state::ManagedState;
 use models::{
-    AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, CreateApiGatewayKeyInput,
-    CreateApiGatewayKeyResult, CreateVirtualApiAccountInput, DeleteApiGatewayComboInput,
-    DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput, RenameAccountInput,
-    SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput, SetToolSetupInput,
-    StartApiGatewayInput, SwitchAccountInput, ToolId, UsageReports, VaultCredential,
-    VaultCredentialInput, VaultCredentialSummary, VaultStatus,
+    AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, BulkImportCodexAccountsInput,
+    CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
+    DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput,
+    RenameAccountInput, SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput,
+    SetToolSetupInput, StartApiGatewayInput, SwitchAccountInput, ToolId, UsageReports,
+    VaultCredential, VaultCredentialInput, VaultCredentialSummary, VaultStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -121,6 +121,24 @@ async fn import_codex_account(
         worker_app
             .state::<ManagedState>()
             .import_codex_account(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn bulk_import_codex_accounts(
+    app: tauri::AppHandle,
+    input: BulkImportCodexAccountsInput,
+) -> Result<AppSnapshot, String> {
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .import_codex_accounts_bulk(input)
             .map_err(display_error)
     })
     .await
@@ -539,6 +557,7 @@ pub fn run() {
             reauthenticate_account,
             add_account,
             import_codex_account,
+            bulk_import_codex_accounts,
             add_api_account,
             fetch_gateway_models,
             rename_account,

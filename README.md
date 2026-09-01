@@ -20,6 +20,7 @@ Get the latest **`.dmg`** from the [**Releases**](https://github.com/hoangpm96/a
 - **Menu-bar quick switch.** A tray icon in the macOS menu bar lists your Claude & Codex accounts (with quota % and plan) so you can switch without opening the window. Closing the window hides the app to the tray; it keeps polling quota in the background.
 - **Quota at a glance.** Reads 5-hour / weekly usage for Claude & Codex and per-model quota for Antigravity, and shows your **subscription plan** (Plus / Pro / Max) when the API reports it.
 - **Per-tool auto-switch.** Configure separately for Claude and Codex — the bare command falls back to another account when the active one nears its quota.
+- **Bulk Codex OAuth import (staging).** Import one K12/9router OAuth export, create isolated profiles in one transaction, and enroll new accounts in the local gateway pool.
 - **Usage & cost tab.** Token usage and estimated cost per tool, plus an aggregated **All** view across tools, charted over a selectable date range.
 - **Local API gateway.** Expose Claude/Codex subscription accounts through a local OpenAI/Anthropic-compatible server with API keys, model combos, fallback rotation, cooldown handling, and gateway usage tracking.
 

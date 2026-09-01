@@ -148,6 +148,7 @@ import type {
   ApiUsageReport,
   AppSnapshot,
   BinaryCandidate,
+  BulkImportCodexAccountsInput,
   CodexLoginMethod,
   ConfigCandidate,
   CreateApiGatewayKeyInput,
@@ -1373,6 +1374,14 @@ export function App() {
           onSubmitImport={async (input) => {
             if (await run("add", () => api.importCodexAccount(input))) {
               setDialog(null);
+            }
+          }}
+          onSubmitBulkImport={async (input) => {
+            if (await run("bulk-import", () => api.bulkImportCodexAccounts(input))) {
+              setDialog(null);
+              // Model discovery is intentionally separate from profile staging; refresh it in the
+              // background so a large batch never blocks the modal or navigation.
+              void api.refreshApiGatewayModels().then(setSnapshot).catch(() => {});
             }
           }}
           onSubmitApi={async (input) => {
@@ -3106,12 +3115,14 @@ function AddDialog({
   onClose,
   onSubmit,
   onSubmitImport,
+  onSubmitBulkImport,
   onSubmitApi,
 }: {
   tool: ToolStatus;
   onClose: () => void;
   onSubmit: (input: AddAccountInput) => Promise<void>;
   onSubmitImport: (input: ImportCodexAccountInput) => Promise<void>;
+  onSubmitBulkImport: (input: BulkImportCodexAccountsInput) => Promise<void>;
   onSubmitApi: (input: AddApiAccountInput) => Promise<void>;
 }) {
   const isCli = tool.id !== "antigravity";
@@ -3122,8 +3133,9 @@ function AddDialog({
     tool.id === "claude"
       ? "--dangerously-skip-permissions"
       : "--dangerously-bypass-approvals-and-sandbox";
-  const [kind, setKind] = useState<"login" | "import" | "api">("login");
+  const [kind, setKind] = useState<"login" | "import" | "bulk" | "api">("login");
   const isImport = canImport && kind === "import";
+  const isBulkImport = canImport && kind === "bulk";
   const isApi = canApi && kind === "api";
   const [codexLoginMethod, setCodexLoginMethod] =
     useState<CodexLoginMethod>("deviceCode");
@@ -3131,6 +3143,9 @@ function AddDialog({
   const [name, setName] = useState("");
   const [launcher, setLauncher] = useState("");
   const [sessionFile, setSessionFile] = useState<File | null>(null);
+  const [bulkSessionFile, setBulkSessionFile] = useState<File | null>(null);
+  const [bulkNamePrefix, setBulkNamePrefix] = useState("acc");
+  const [bulkLauncherPrefix, setBulkLauncherPrefix] = useState("bulk-");
   const [message, setMessage] = useState<string | null>(null);
 
   // API-mode state.
@@ -3178,8 +3193,31 @@ function AddDialog({
       setMessage("Account name is limited to 20 characters");
       return;
     }
-    if (isCli && launcher.trim() === "") {
+    if (isCli && launcher.trim() === "" && !isBulkImport) {
       setMessage(`A custom command is required (e.g. ${tool.id}-work)`);
+      return;
+    }
+    if (isBulkImport) {
+      if (!bulkSessionFile) {
+        setMessage("Choose the batch OAuth session export file first");
+        return;
+      }
+      if (bulkSessionFile.size > 5 * 1024 * 1024) {
+        setMessage("Session file is too large (maximum is 5 MB)");
+        return;
+      }
+      let sessionJson: string;
+      try {
+        sessionJson = await bulkSessionFile.text();
+      } catch {
+        setMessage("Couldn't read the selected session file");
+        return;
+      }
+      await onSubmitBulkImport({
+        sessionJson,
+        namePrefix: bulkNamePrefix.trim() || "acc",
+        launcherPrefix: bulkLauncherPrefix.trim() || "bulk-",
+      });
       return;
     }
     if (isImport) {
@@ -3246,7 +3284,7 @@ function AddDialog({
         <h2>{isCli ? `Add ${tool.name} account` : "Save the signed-in Antigravity IDE account"}</h2>
 
         {canApi && (
-          <div className={`kindToggle${canImport ? " threeWay" : ""}`}>
+          <div className={`kindToggle${canImport ? " fourWay" : ""}`}>
             <button
               type="button"
               className={kind === "login" ? "active" : ""}
@@ -3263,6 +3301,15 @@ function AddDialog({
                 Import K12
               </button>
             )}
+            {canImport && (
+              <button
+                type="button"
+                className={kind === "bulk" ? "active" : ""}
+                onClick={() => setKind("bulk")}
+              >
+                Bulk OAuth
+              </button>
+            )}
             <button
               type="button"
               className={kind === "api" ? "active" : ""}
@@ -3273,7 +3320,7 @@ function AddDialog({
           </div>
         )}
 
-        <label>
+        {!isBulkImport && <label>
           Account name
           <input
             autoFocus
@@ -3282,11 +3329,11 @@ function AddDialog({
             onChange={(event) => setName(event.target.value)}
             placeholder="Auto-generated if left blank"
           />
-        </label>
+        </label>}
 
         {isCli && !isApi && (
           <>
-            {tool.id === "codex" && !isImport && (
+            {tool.id === "codex" && !isImport && !isBulkImport && (
               <fieldset className="codexLoginMethod">
                 <legend>Sign-in method</legend>
                 <div className="kindToggle">
@@ -3342,22 +3389,72 @@ function AddDialog({
                 )}
               </div>
             )}
-            <label>
-              <span className="labelRow">
-                Custom command (required)
-                <span
-                  className="helpDot"
-                  title={`Open a terminal and run this command to use the account separately, in parallel. Forces the ${tool.id}- prefix, only a-z 0-9 - _`}
-                >
-                  <CircleHelp />
+            {isBulkImport && (
+              <div className="importSessionPanel">
+                <label>
+                  Batch OAuth session export
+                  <input
+                    type="file"
+                    accept=".json,.txt,application/json,text/plain"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      if (file && file.size > 5 * 1024 * 1024) {
+                        setBulkSessionFile(null);
+                        setMessage("Session file is too large (maximum is 5 MB)");
+                        return;
+                      }
+                      setMessage(null);
+                      setBulkSessionFile(file);
+                    }}
+                  />
+                </label>
+                <small>
+                  Import OAuth sessions only. The file is processed locally, reduced to Codex
+                  credentials, and each new account is enrolled in the gateway pool.
+                </small>
+                {bulkSessionFile && (
+                  <span className="importSessionFile" title={bulkSessionFile.name}>
+                    Selected: {bulkSessionFile.name}
+                  </span>
+                )}
+                <label>
+                  Account name prefix
+                  <input
+                    value={bulkNamePrefix}
+                    maxLength={16}
+                    onChange={(event) => setBulkNamePrefix(event.target.value)}
+                    placeholder="acc"
+                  />
+                </label>
+                <label>
+                  Command prefix
+                  <input
+                    value={bulkLauncherPrefix}
+                    maxLength={16}
+                    onChange={(event) => setBulkLauncherPrefix(event.target.value)}
+                    placeholder="bulk-"
+                  />
+                </label>
+              </div>
+            )}
+            {!isBulkImport && (
+              <label>
+                <span className="labelRow">
+                  Custom command (required)
+                  <span
+                    className="helpDot"
+                    title={`Open a terminal and run this command to use the account separately, in parallel. Forces the ${tool.id}- prefix, only a-z 0-9 - _`}
+                  >
+                    <CircleHelp />
+                  </span>
                 </span>
-              </span>
-              <input
-                value={launcher}
-                onChange={(event) => setLauncher(event.target.value)}
-                placeholder={`${tool.id}-work`}
-              />
-            </label>
+                <input
+                  value={launcher}
+                  onChange={(event) => setLauncher(event.target.value)}
+                  placeholder={`${tool.id}-work`}
+                />
+              </label>
+            )}
           </>
         )}
 

@@ -2690,6 +2690,10 @@ button.danger:hover:not(:disabled) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.kindToggle.fourWay {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .kindToggle button {
   background: transparent;
   border-color: transparent;

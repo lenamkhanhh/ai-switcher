@@ -945,6 +945,21 @@ pub struct ImportCodexAccountInput {
     pub session_json: String,
 }
 
+/// Import one K12/OAuth export containing multiple Codex subscription accounts.
+///
+/// The export contains OAuth session material only; raw email/password/2FA
+/// input is intentionally not accepted by this command. Prefixes are used to
+/// generate deterministic, unique display names and launchers for the batch.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportCodexAccountsInput {
+    pub session_json: String,
+    #[serde(default)]
+    pub name_prefix: Option<String>,
+    #[serde(default)]
+    pub launcher_prefix: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AddMode {

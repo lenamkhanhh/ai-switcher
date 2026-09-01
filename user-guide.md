@@ -231,6 +231,20 @@ previous Codex session as usual; switching the active account doesn't erase it.
 Same as Claude (§3.5–3.6): 5-hour + weekly bars, **Refresh quota**, and the
 auto-switch toggle with 90/95/100% thresholds.
 
+### 4.4 Bulk OAuth import (staging)
+
+The Codex Add dialog has a **Bulk OAuth** mode for importing a K12 or 9router
+JSON export containing multiple OAuth sessions. The app validates the whole
+batch first, creates one isolated profile + command per new account, and
+enrolls those profiles in the local API gateway pool in the same state commit.
+Re-importing the same export is safe: accounts already present are skipped.
+
+The staging flow accepts OAuth session exports only. It does not accept or
+persist raw `email|password|2fa` lines; keep any login worker separate and pass
+only its resulting OAuth export to the app. After import, refresh the gateway
+model registry, create/select a combo, then use **Add to Codex** in the API tab
+to point a Codex CLI at the pool.
+
 ---
 
 ## 5. Antigravity IDE

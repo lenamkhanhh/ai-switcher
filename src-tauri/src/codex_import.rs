@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -47,6 +47,50 @@ struct K12Credentials {
     expires_at: Option<i64>,
 }
 
+/// Shape emitted by the local 9router login/export tool. Keep the aliases
+/// explicit so both its camelCase JSON and a normalized snake_case export are
+/// accepted without accepting arbitrary provider records.
+#[derive(Deserialize)]
+struct NineRouterConnection {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(rename = "authType", alias = "auth_type", default)]
+    auth_type: Option<String>,
+    #[serde(rename = "accessToken", alias = "access_token", default)]
+    access_token: String,
+    #[serde(rename = "refreshToken", alias = "refresh_token", default)]
+    refresh_token: String,
+    #[serde(rename = "idToken", alias = "id_token", default)]
+    id_token: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(
+        rename = "providerSpecificData",
+        alias = "provider_specific_data",
+        default
+    )]
+    provider_specific_data: Option<NineRouterProviderData>,
+}
+
+impl Drop for NineRouterConnection {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+        self.id_token.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
+struct NineRouterProviderData {
+    #[serde(rename = "chatgptAccountId", alias = "chatgpt_account_id", default)]
+    chatgpt_account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NineRouterExport {
+    connections: Vec<NineRouterConnection>,
+}
+
 impl Drop for K12Credentials {
     fn drop(&mut self) {
         self.access_token.zeroize();
@@ -75,9 +119,16 @@ pub(crate) fn parse_k12_export_batch(raw: &str) -> Result<Vec<ImportedCodexSessi
     }
 
     let raw = raw.trim_start_matches('\u{feff}');
-    let export: K12Export = serde_json::from_str(raw).map_err(|error| {
-        anyhow::anyhow!("Session file does not match the K12 export format: {error}")
-    })?;
+    let export: K12Export = match serde_json::from_str(raw) {
+        Ok(export) => export,
+        Err(k12_error) => {
+            return parse_nine_router_export(raw).map_err(|router_error| {
+                anyhow::anyhow!(
+                    "Session file is neither a K12 nor a 9router Codex OAuth export: K12: {k12_error}; 9router: {router_error}"
+                )
+            })
+        }
+    };
     if export.accounts.is_empty() {
         bail!("K12 export must contain at least one account");
     }
@@ -93,6 +144,78 @@ pub(crate) fn parse_k12_export_batch(raw: &str) -> Result<Vec<ImportedCodexSessi
             bail!("K12 export contains duplicate account id");
         }
         sessions.push(session);
+    }
+    Ok(sessions)
+}
+
+fn parse_nine_router_export(raw: &str) -> Result<Vec<ImportedCodexSession>> {
+    let connections = match serde_json::from_str::<Vec<NineRouterConnection>>(raw) {
+        Ok(connections) => connections,
+        Err(_) => {
+            serde_json::from_str::<NineRouterExport>(raw)
+                .map_err(|error| anyhow::anyhow!("invalid 9router export: {error}"))?
+                .connections
+        }
+    };
+    if connections.is_empty() {
+        bail!("9router export must contain at least one connection");
+    }
+    if connections.len() > MAX_BULK_ACCOUNTS {
+        bail!("9router export contains too many accounts (maximum is {MAX_BULK_ACCOUNTS})");
+    }
+
+    let mut account_ids = HashSet::with_capacity(connections.len());
+    let mut sessions = Vec::with_capacity(connections.len());
+    for connection in connections {
+        if connection
+            .provider
+            .as_deref()
+            .is_some_and(|provider| !provider.eq_ignore_ascii_case("codex"))
+        {
+            bail!("9router export contains a non-Codex connection");
+        }
+        if connection
+            .auth_type
+            .as_deref()
+            .is_some_and(|auth_type| !auth_type.eq_ignore_ascii_case("oauth"))
+        {
+            bail!("9router export contains a non-OAuth connection");
+        }
+
+        let account_id = connection
+            .provider_specific_data
+            .as_ref()
+            .and_then(|data| data.chatgpt_account_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("9router connection is missing chatgptAccountId")?;
+        if Uuid::parse_str(account_id).is_err() {
+            bail!("The 9router connection has an invalid ChatGPT account id");
+        }
+        if !account_ids.insert(account_id.to_string()) {
+            bail!("9router export contains duplicate account id");
+        }
+
+        let email = connection
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        if email
+            .as_ref()
+            .is_some_and(|value| value.len() > 320 || !value.contains('@'))
+        {
+            bail!("The 9router connection email is invalid");
+        }
+
+        sessions.push(ImportedCodexSession {
+            account_id: account_id.to_string(),
+            email,
+            access_token: required_secret(&connection.access_token, "access_token")?,
+            refresh_token: required_secret(&connection.refresh_token, "refresh_token")?,
+            id_token: required_secret(&connection.id_token, "id_token")?,
+        });
     }
     Ok(sessions)
 }

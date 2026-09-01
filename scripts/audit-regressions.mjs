@@ -12,6 +12,7 @@ test("heavy Tauri commands are async and move blocking work off the UI thread", 
     "reauthenticate_account",
     "add_account",
     "import_codex_account",
+    "bulk_import_codex_accounts",
     "add_api_account",
     "fetch_gateway_models",
     "rename_account",
@@ -228,17 +229,22 @@ test("K12 Codex import stays local and reduces the export to OAuth fields", asyn
   const tauri = await read("src/tauri.ts");
 
   assert.match(importerProduction, /MAX_IMPORT_BYTES/);
-  assert.match(importerProduction, /accounts\.len\(\) != 1/);
+  assert.match(importerProduction, /MAX_BULK_ACCOUNTS/);
+  assert.match(importerProduction, /parse_k12_export_batch/);
+  assert.match(importerProduction, /duplicate account id/);
   assert.match(importerProduction, /platform\.eq_ignore_ascii_case\("openai"\)/);
   assert.match(importerProduction, /"refresh_token"/);
   assert.doesNotMatch(importerProduction, /model_mapping/);
   assert.match(appState, /write_codex_auth\(&profile, &auth_json\)/);
   assert.match(appState, /codex_login_method: CodexLoginMethod::BrowserProfile/);
+  assert.match(appState, /enroll_codex_accounts/);
   assert.match(appState, /migrate_codex_imported_login_methods/);
   assert.match(appState, /Imported session/);
   assert.match(app, /Import K12/);
+  assert.match(app, /Bulk OAuth/);
   assert.match(app, /Nothing is uploaded/);
   assert.match(tauri, /import_codex_account/);
+  assert.match(tauri, /bulk_import_codex_accounts/);
 });
 
 test("Settings formats CLI paths for display without mutating stored setup paths", async () => {

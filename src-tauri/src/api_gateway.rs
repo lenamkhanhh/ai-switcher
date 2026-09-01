@@ -1,8 +1,7 @@
 use crate::models::{
     Account, AccountState, ApiGatewayAccount, ApiGatewayCombo, ApiGatewayConfig,
-    ApiGatewayModelRegistry,
-    ApiGatewayServerState, ApiGatewayStatus, ApiRotationStrategy, ApiUsageReport, ApiUsageRow,
-    TokenBreakdown, ToolId,
+    ApiGatewayModelRegistry, ApiGatewayServerState, ApiGatewayStatus, ApiRotationStrategy,
+    ApiUsageReport, ApiUsageRow, TokenBreakdown, ToolId,
 };
 use crate::store::{Store, StoredState};
 use crate::tools::default_config_dir;
@@ -3744,7 +3743,11 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
                 .iter()
                 .find(|entry| entry.account_id == "existing")
                 .map(|entry| (&entry.enabled, &entry.state, &entry.error)),
-            Some((&false, &ApiPoolAccountState::Excluded, &Some("disabled by user".to_string())))
+            Some((
+                &false,
+                &ApiPoolAccountState::Excluded,
+                &Some("disabled by user".to_string())
+            ))
         );
         let new = config
             .accounts
