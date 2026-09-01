@@ -2791,6 +2791,7 @@ impl ManagedState {
                 match create_profile_with_default(&tool_id, &self.store, &id, &default_dir) {
                     Ok(profile) => profile,
                     Err(error) => {
+                        let _ = delete_account_files(&tool_id, &self.store, &id);
                         cleanup(&staged_files);
                         return Err(error.context("Couldn't create an imported Codex profile"));
                     }

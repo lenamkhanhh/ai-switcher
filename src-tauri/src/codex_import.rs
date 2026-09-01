@@ -88,6 +88,7 @@ struct NineRouterProviderData {
 
 #[derive(Deserialize)]
 struct NineRouterExport {
+    #[serde(alias = "providerConnections")]
     connections: Vec<NineRouterConnection>,
 }
 
@@ -452,5 +453,30 @@ mod tests {
             "33333333-3333-4333-8333-333333333333"
         );
         assert_eq!(sessions[0].email.as_deref(), Some("router@example.test"));
+    }
+
+    #[test]
+    fn parses_the_9router_provider_connections_wrapper() {
+        let export = r#"{
+          "settings": {"comboStrategy": "fallback"},
+          "providerConnections": [{
+            "provider": "codex",
+            "authType": "oauth",
+            "accessToken": "access-token",
+            "refreshToken": "refresh-token",
+            "idToken": "id-token",
+            "email": "wrapper@example.test",
+            "providerSpecificData": {
+              "chatgptAccountId": "44444444-4444-4444-8444-444444444444"
+            }
+          }]
+        }"#;
+
+        let sessions = parse_k12_export_batch(export).expect("valid 9router providerConnections");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].account_id,
+            "44444444-4444-4444-8444-444444444444"
+        );
     }
 }
