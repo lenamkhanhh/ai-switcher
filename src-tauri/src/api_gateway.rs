@@ -1,5 +1,6 @@
 use crate::models::{
-    Account, AccountState, ApiGatewayCombo, ApiGatewayConfig, ApiGatewayModelRegistry,
+    Account, AccountState, ApiGatewayAccount, ApiGatewayCombo, ApiGatewayConfig,
+    ApiGatewayModelRegistry,
     ApiGatewayServerState, ApiGatewayStatus, ApiRotationStrategy, ApiUsageReport, ApiUsageRow,
     TokenBreakdown, ToolId,
 };
@@ -536,6 +537,37 @@ fn gateway_account_enabled(data: &StoredState, tool_id: &ToolId, account_id: &st
         .iter()
         .find(|entry| &entry.tool_id == tool_id && entry.account_id == account_id)
         .is_none_or(|entry| entry.enabled)
+}
+
+/// Add newly imported subscription accounts to the local gateway pool.
+///
+/// Existing entries are deliberately left untouched so a user's explicit
+/// exclusion/cooldown/error state survives a re-import or a retry. The helper
+/// is idempotent and only creates enabled, available entries for new ids.
+pub(crate) fn enroll_codex_accounts<I, S>(config: &mut ApiGatewayConfig, account_ids: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for account_id in account_ids {
+        let account_id = account_id.as_ref().trim();
+        if account_id.is_empty()
+            || config
+                .accounts
+                .iter()
+                .any(|entry| entry.tool_id == ToolId::Codex && entry.account_id == account_id)
+        {
+            continue;
+        }
+        config.accounts.push(ApiGatewayAccount {
+            tool_id: ToolId::Codex,
+            account_id: account_id.to_string(),
+            enabled: true,
+            state: crate::models::ApiPoolAccountState::Available,
+            cooldown_until: None,
+            error: None,
+        });
+    }
 }
 
 #[allow(clippy::result_large_err)]
