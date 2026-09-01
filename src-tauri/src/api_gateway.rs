@@ -3127,7 +3127,9 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
-    use crate::models::{ApiGatewayKey, QuotaInfo, QuotaWindow};
+    use crate::models::{
+        ApiGatewayAccount, ApiGatewayKey, ApiPoolAccountState, QuotaInfo, QuotaWindow,
+    };
 
     fn quota(five: f64, weekly: f64) -> QuotaInfo {
         QuotaInfo {
@@ -3686,6 +3688,40 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         let fill_first = select_member(&state, &data, &combo, "fill", &tried).unwrap();
         assert_eq!(fill_first.account.id, "a1");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enrolling_codex_accounts_is_idempotent_and_preserves_existing_state() {
+        let mut config = ApiGatewayConfig::default();
+        config.accounts.push(ApiGatewayAccount {
+            tool_id: ToolId::Codex,
+            account_id: "existing".to_string(),
+            enabled: false,
+            state: ApiPoolAccountState::Excluded,
+            cooldown_until: None,
+            error: Some("disabled by user".to_string()),
+        });
+
+        enroll_codex_accounts(&mut config, &["existing".to_string(), "new".to_string()]);
+        enroll_codex_accounts(&mut config, &["existing".to_string(), "new".to_string()]);
+
+        assert_eq!(config.accounts.len(), 2);
+        assert_eq!(
+            config
+                .accounts
+                .iter()
+                .find(|entry| entry.account_id == "existing")
+                .map(|entry| (&entry.enabled, &entry.state, &entry.error)),
+            Some((&false, &ApiPoolAccountState::Excluded, &Some("disabled by user".to_string())))
+        );
+        let new = config
+            .accounts
+            .iter()
+            .find(|entry| entry.account_id == "new")
+            .expect("new account enrolled");
+        assert!(new.enabled);
+        assert_eq!(new.state, ApiPoolAccountState::Available);
+        assert!(new.error.is_none());
     }
 
     #[test]
