@@ -280,8 +280,14 @@ mod tests {
 
         let sessions = parse_k12_export_batch(&export).expect("valid batch export");
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].account_id, "11111111-1111-4111-8111-111111111111");
-        assert_eq!(sessions[1].account_id, "22222222-2222-4222-8222-222222222222");
+        assert_eq!(
+            sessions[0].account_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            sessions[1].account_id,
+            "22222222-2222-4222-8222-222222222222"
+        );
         assert_eq!(sessions[1].email.as_deref(), Some("second@example.test"));
     }
 
@@ -298,5 +304,30 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn parses_a_9router_connection_export() {
+        let export = r#"[
+          {
+            "provider": "codex",
+            "authType": "oauth",
+            "accessToken": "access-token",
+            "refreshToken": "refresh-token",
+            "idToken": "id-token",
+            "email": "router@example.test",
+            "providerSpecificData": {
+              "chatgptAccountId": "33333333-3333-4333-8333-333333333333"
+            }
+          }
+        ]"#;
+
+        let sessions = parse_k12_export_batch(export).expect("valid 9router export");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].account_id,
+            "33333333-3333-4333-8333-333333333333"
+        );
+        assert_eq!(sessions[0].email.as_deref(), Some("router@example.test"));
     }
 }
