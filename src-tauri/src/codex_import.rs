@@ -154,7 +154,7 @@ fn required_secret(value: &str, field: &str) -> Result<Zeroizing<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_auth_json, parse_k12_export};
+    use super::{codex_auth_json, parse_k12_export, parse_k12_export_batch};
     use serde_json::Value;
 
     fn sample_export() -> String {
@@ -237,5 +237,32 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("refresh_token"));
+    }
+
+    #[test]
+    fn parses_a_batch_of_unique_openai_oauth_accounts() {
+        let mut export = sample_export();
+        export = export.replace(
+            "          }]\n        }",
+            "          }, {\n            \"platform\": \"openai\",\n            \"type\": \"oauth\",\n            \"credentials\": {\n              \"access_token\": \"access-token-2\",\n              \"refresh_token\": \"refresh-token-2\",\n              \"id_token\": \"id-token-2\",\n              \"chatgpt_account_id\": \"22222222-2222-4222-8222-222222222222\",\n              \"email\": \"second@example.test\"\n            }\n          }]\n        }",
+        );
+
+        let sessions = parse_k12_export_batch(&export).expect("valid batch export");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].account_id, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(sessions[1].account_id, "22222222-2222-4222-8222-222222222222");
+        assert_eq!(sessions[1].email.as_deref(), Some("second@example.test"));
+    }
+
+    #[test]
+    fn rejects_duplicate_account_ids_in_a_batch() {
+        let mut export = sample_export();
+        export = export.replace(
+            "          }]\n        }",
+            "          }, {\n            \"platform\": \"openai\",\n            \"type\": \"oauth\",\n            \"credentials\": {\n              \"access_token\": \"access-token-2\",\n              \"refresh_token\": \"refresh-token-2\",\n              \"id_token\": \"id-token-2\",\n              \"chatgpt_account_id\": \"11111111-1111-4111-8111-111111111111\"\n            }\n          }]\n        }",
+        );
+
+        let error = parse_k12_export_batch(&export).expect_err("duplicate account ids must fail");
+        assert!(error.to_string().contains("duplicate"));
     }
 }
