@@ -3130,6 +3130,7 @@ function AddDialog({
   onSubmit,
   onSubmitImport,
   onSubmitBulkImport,
+  onSubmitBulkLogin,
   onSubmitApi,
 }: {
   tool: ToolStatus;

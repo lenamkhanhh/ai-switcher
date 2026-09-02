@@ -20,7 +20,7 @@ const BRIDGE_FILE: &str = "bulk_login_bridge.py";
 /// Validate the user-owned credential file without returning or logging any secret material.
 /// The credentials are only used to create a short-lived staging file for the external worker.
 pub(crate) fn validate_credentials_file(raw: &str) -> Result<usize> {
-    if raw.as_bytes().len() > MAX_CREDENTIALS_BYTES {
+    if raw.len() > MAX_CREDENTIALS_BYTES {
         bail!("Credential file is too large (maximum is 5 MB)");
     }
 
@@ -99,7 +99,11 @@ pub(crate) fn bridge_args(
         OsString::from("--workers"),
         OsString::from(workers.to_string()),
     ];
-    args.push(OsString::from(if headed { "--headed" } else { "--headless" }));
+    args.push(OsString::from(if headed {
+        "--headed"
+    } else {
+        "--headless"
+    }));
     args
 }
 
@@ -129,17 +133,22 @@ pub(crate) fn run_staging_bulk_login(
         secure_remove(&accounts_path);
         return Err(error);
     }
+    if let Err(error) = create_protected_empty_file(&output_path) {
+        secure_remove(&accounts_path);
+        secure_remove(&output_path);
+        return Err(error).context("Couldn't prepare the temporary OAuth export");
+    }
 
-    let result = run_worker_process(
-        &python,
-        &python_prefix,
-        &bridge,
-        &worker,
-        &accounts_path,
-        &output_path,
+    let result = run_worker_process(WorkerInvocation {
+        python: &python,
+        python_prefix: &python_prefix,
+        bridge: &bridge,
+        worker: &worker,
+        accounts: &accounts_path,
+        output: &output_path,
         workers,
         headed,
-    );
+    });
     secure_remove(&accounts_path);
 
     let status = match result {
@@ -160,37 +169,45 @@ pub(crate) fn run_staging_bulk_login(
     if !status.success() {
         bail!("Bulk login worker failed (exit code {})", exit_code(status));
     }
-    if output.as_bytes().len() > MAX_CREDENTIALS_BYTES {
+    if output.len() > MAX_CREDENTIALS_BYTES {
         bail!("Bulk login worker returned an unexpectedly large OAuth export");
     }
     // Parse just enough to make a malformed worker result fail before it reaches state mutation.
     let value: serde_json::Value =
         serde_json::from_str(&output).context("Bulk login worker returned invalid JSON")?;
-    if !value
+    if value
         .get("providerConnections")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|connections| !connections.is_empty())
+        .is_none_or(|connections| connections.is_empty())
     {
         bail!("Bulk login worker returned no OAuth sessions");
     }
     Ok(output)
 }
 
-fn run_worker_process(
-    python: &Path,
-    python_prefix: &[String],
-    bridge: &Path,
-    worker: &Path,
-    accounts: &Path,
-    output: &Path,
+struct WorkerInvocation<'a> {
+    python: &'a Path,
+    python_prefix: &'a [String],
+    bridge: &'a Path,
+    worker: &'a Path,
+    accounts: &'a Path,
+    output: &'a Path,
     workers: u8,
     headed: bool,
-) -> Result<ExitStatus> {
-    let args = bridge_args(worker, accounts, output, workers, headed);
-    let mut command = Command::new(python);
+}
+
+fn run_worker_process(invocation: WorkerInvocation<'_>) -> Result<ExitStatus> {
+    let args = bridge_args(
+        invocation.worker,
+        invocation.accounts,
+        invocation.output,
+        invocation.workers,
+        invocation.headed,
+    );
+    let mut command = Command::new(invocation.python);
     command
-        .args(python_prefix)
-        .arg(bridge)
+        .args(invocation.python_prefix)
+        .arg(invocation.bridge)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -263,7 +280,11 @@ fn resolve_bridge_script(resource_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(resource_dir) = resource_dir {
         candidates.push(resource_dir.join(BRIDGE_FILE));
     }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(BRIDGE_FILE));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BRIDGE_FILE),
+    );
     candidates
         .into_iter()
         .find(|path| path.is_file())
@@ -291,6 +312,20 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Err(error) = set_owner_only_permissions(path) {
         secure_remove(path);
         return Err(error).context("Couldn't protect temporary credentials");
+    }
+    Ok(())
+}
+
+fn create_protected_empty_file(path: &Path) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("Couldn't create temporary {path:?} file"))?;
+    drop(file);
+    if let Err(error) = set_owner_only_permissions(path) {
+        secure_remove(path);
+        return Err(error);
     }
     Ok(())
 }

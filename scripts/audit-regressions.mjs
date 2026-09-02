@@ -13,6 +13,7 @@ test("heavy Tauri commands are async and move blocking work off the UI thread", 
     "add_account",
     "import_codex_account",
     "bulk_import_codex_accounts",
+    "bulk_login_codex_staging",
     "add_api_account",
     "fetch_gateway_models",
     "rename_account",
@@ -227,6 +228,7 @@ test("K12 Codex import stays local and reduces the export to OAuth fields", asyn
   const appState = await read("src-tauri/src/app_state.rs");
   const app = await read("src/App.tsx");
   const tauri = await read("src/tauri.ts");
+  const bulkLogin = await read("src-tauri/src/bulk_login.rs");
 
   assert.match(importerProduction, /MAX_IMPORT_BYTES/);
   assert.match(importerProduction, /MAX_BULK_ACCOUNTS/);
@@ -242,9 +244,30 @@ test("K12 Codex import stays local and reduces the export to OAuth fields", asyn
   assert.match(appState, /Imported session/);
   assert.match(app, /Import K12/);
   assert.match(app, /Bulk OAuth/);
+  assert.match(app, /Auto login \(staging\)/);
+  assert.match(app, /Credentials are used transiently/);
   assert.match(app, /Nothing is uploaded/);
   assert.match(tauri, /import_codex_account/);
   assert.match(tauri, /bulk_import_codex_accounts/);
+  assert.match(tauri, /bulk_login_codex_staging/);
+  assert.match(bulkLogin, /MAX_LOGIN_ACCOUNTS/);
+});
+
+test("staging bulk-login bridge keeps credential handling local and bounded", async () => {
+  const rust = await read("src-tauri/src/bulk_login.rs");
+  const bridge = await read("src-tauri/resources/bulk_login_bridge.py");
+  const config = JSON.parse(await read("src-tauri/tauri.conf.json"));
+
+  assert.match(rust, /Zeroizing/);
+  assert.match(rust, /MAX_LOGIN_ACCOUNTS/);
+  assert.match(rust, /stdout\(Stdio::null\(\)\)/);
+  assert.match(rust, /stderr\(Stdio::null\(\)\)/);
+  assert.match(rust, /secure_remove/);
+  assert.match(bridge, /providerConnections/);
+  assert.match(bridge, /worker\.debug_page = lambda/);
+  assert.match(bridge, /MAX_WORKERS = 3/);
+  assert.ok(config.bundle.resources.includes("resources/bulk_login_bridge.py"));
+  assert.doesNotMatch(bridge, /print\(/);
 });
 
 test("Settings formats CLI paths for display without mutating stored setup paths", async () => {

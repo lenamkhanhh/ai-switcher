@@ -61,7 +61,9 @@ def read_accounts(path: Path):
 
 def write_export(path: Path, connections):
     payload = json.dumps({"providerConnections": connections}, ensure_ascii=False).encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    # The Rust parent pre-creates this path with an owner-only ACL. Truncate that protected file
+    # instead of creating a new file with inherited temp-directory permissions on Windows.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(path, flags, 0o600)
     try:
         with os.fdopen(fd, "wb") as output:
@@ -132,7 +134,7 @@ def run(args):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(description="AI Account Switcher staging OAuth bridge")
     parser.add_argument("--worker", required=True)
     parser.add_argument("--accounts", required=True)
     parser.add_argument("--output", required=True)
