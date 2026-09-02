@@ -960,6 +960,26 @@ pub struct BulkImportCodexAccountsInput {
     pub launcher_prefix: Option<String>,
 }
 
+/// Run the local staging login bridge against a user-owned `email|password|2fa` file.
+///
+/// The raw text is consumed in memory, written only to a protected temporary file while the
+/// external Playwright worker runs, then removed. It is never persisted in `state.json`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkLoginCodexInput {
+    pub credentials_text: String,
+    #[serde(default)]
+    pub worker_path: Option<String>,
+    #[serde(default = "default_bulk_login_workers")]
+    pub workers: u8,
+    #[serde(default = "default_true")]
+    pub headed: bool,
+}
+
+fn default_bulk_login_workers() -> u8 {
+    3
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AddMode {

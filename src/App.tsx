@@ -149,6 +149,7 @@ import type {
   AppSnapshot,
   BinaryCandidate,
   BulkImportCodexAccountsInput,
+  BulkLoginCodexInput,
   CodexLoginMethod,
   ConfigCandidate,
   CreateApiGatewayKeyInput,
@@ -1381,6 +1382,19 @@ export function App() {
               setDialog(null);
               // Model discovery is intentionally separate from profile staging; refresh it in the
               // background so a large batch never blocks the modal or navigation.
+              void api.refreshApiGatewayModels().then(setSnapshot).catch(() => {});
+            }
+          }}
+          onSubmitBulkLogin={async (input) => {
+            if (
+              await run(
+                "bulk-login",
+                () => api.bulkLoginCodexStaging(input),
+                "Staging login completed; OAuth sessions were imported into the pool",
+              )
+            ) {
+              setDialog(null);
+              setView("api");
               void api.refreshApiGatewayModels().then(setSnapshot).catch(() => {});
             }
           }}
@@ -3123,6 +3137,7 @@ function AddDialog({
   onSubmit: (input: AddAccountInput) => Promise<void>;
   onSubmitImport: (input: ImportCodexAccountInput) => Promise<void>;
   onSubmitBulkImport: (input: BulkImportCodexAccountsInput) => Promise<void>;
+  onSubmitBulkLogin: (input: BulkLoginCodexInput) => Promise<void>;
   onSubmitApi: (input: AddApiAccountInput) => Promise<void>;
 }) {
   const isCli = tool.id !== "antigravity";
@@ -3133,9 +3148,10 @@ function AddDialog({
     tool.id === "claude"
       ? "--dangerously-skip-permissions"
       : "--dangerously-bypass-approvals-and-sandbox";
-  const [kind, setKind] = useState<"login" | "import" | "bulk" | "api">("login");
+  const [kind, setKind] = useState<"login" | "import" | "bulk" | "auto" | "api">("login");
   const isImport = canImport && kind === "import";
   const isBulkImport = canImport && kind === "bulk";
+  const isBulkLogin = canImport && kind === "auto";
   const isApi = canApi && kind === "api";
   const [codexLoginMethod, setCodexLoginMethod] =
     useState<CodexLoginMethod>("deviceCode");
@@ -3146,6 +3162,10 @@ function AddDialog({
   const [bulkSessionFile, setBulkSessionFile] = useState<File | null>(null);
   const [bulkNamePrefix, setBulkNamePrefix] = useState("acc");
   const [bulkLauncherPrefix, setBulkLauncherPrefix] = useState("bulk-");
+  const [bulkLoginFile, setBulkLoginFile] = useState<File | null>(null);
+  const [bulkLoginWorkerPath, setBulkLoginWorkerPath] = useState("");
+  const [bulkLoginWorkers, setBulkLoginWorkers] = useState("3");
+  const [bulkLoginHeaded, setBulkLoginHeaded] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
 
   // API-mode state.
@@ -3220,6 +3240,36 @@ function AddDialog({
       });
       return;
     }
+    if (isBulkLogin) {
+      if (!bulkLoginFile) {
+        setMessage("Choose the email|password|2fa file first");
+        return;
+      }
+      if (bulkLoginFile.size > 5 * 1024 * 1024) {
+        setMessage("Credential file is too large (maximum is 5 MB)");
+        return;
+      }
+      const workers = Number(bulkLoginWorkers);
+      if (!Number.isInteger(workers) || workers < 1 || workers > 3) {
+        setMessage("Workers must be between 1 and 3");
+        return;
+      }
+      let credentialsText: string;
+      try {
+        credentialsText = await bulkLoginFile.text();
+      } catch {
+        setMessage("Couldn't read the selected credential file");
+        return;
+      }
+      await onSubmitBulkLogin({
+        credentialsText,
+        workerPath: bulkLoginWorkerPath.trim() || undefined,
+        workers,
+        headed: bulkLoginHeaded,
+      });
+      setBulkLoginFile(null);
+      return;
+    }
     if (isImport) {
       if (!sessionFile) {
         setMessage("Choose the K12 session export file first");
@@ -3284,7 +3334,7 @@ function AddDialog({
         <h2>{isCli ? `Add ${tool.name} account` : "Save the signed-in Antigravity IDE account"}</h2>
 
         {canApi && (
-          <div className={`kindToggle${canImport ? " fourWay" : ""}`}>
+          <div className={`kindToggle${canImport ? " fiveWay" : ""}`}>
             <button
               type="button"
               className={kind === "login" ? "active" : ""}
@@ -3310,6 +3360,15 @@ function AddDialog({
                 Bulk OAuth
               </button>
             )}
+            {canImport && (
+              <button
+                type="button"
+                className={kind === "auto" ? "active" : ""}
+                onClick={() => setKind("auto")}
+              >
+                Auto login (staging)
+              </button>
+            )}
             <button
               type="button"
               className={kind === "api" ? "active" : ""}
@@ -3320,7 +3379,7 @@ function AddDialog({
           </div>
         )}
 
-        {!isBulkImport && <label>
+        {!isBulkImport && !isBulkLogin && <label>
           Account name
           <input
             autoFocus
@@ -3333,7 +3392,7 @@ function AddDialog({
 
         {isCli && !isApi && (
           <>
-            {tool.id === "codex" && !isImport && !isBulkImport && (
+            {tool.id === "codex" && !isImport && !isBulkImport && !isBulkLogin && (
               <fieldset className="codexLoginMethod">
                 <legend>Sign-in method</legend>
                 <div className="kindToggle">
@@ -3437,7 +3496,67 @@ function AddDialog({
                 </label>
               </div>
             )}
-            {!isBulkImport && (
+            {isBulkLogin && (
+              <div className="importSessionPanel stagingLoginPanel">
+                <label>
+                  Credential file (`email|password|2fa`)
+                  <input
+                    type="file"
+                    accept=".txt,.csv,text/plain"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      if (file && file.size > 5 * 1024 * 1024) {
+                        setBulkLoginFile(null);
+                        setMessage("Credential file is too large (maximum is 5 MB)");
+                        return;
+                      }
+                      setMessage(null);
+                      setBulkLoginFile(file);
+                    }}
+                  />
+                </label>
+                {bulkLoginFile && (
+                  <span className="importSessionFile" title={bulkLoginFile.name}>
+                    Selected: {bulkLoginFile.name}
+                  </span>
+                )}
+                <label>
+                  9router worker path (optional)
+                  <input
+                    value={bulkLoginWorkerPath}
+                    onChange={(event) => setBulkLoginWorkerPath(event.target.value)}
+                    placeholder={String.raw`D:\9router\Login tự động 9router v2\auto_login.py`}
+                  />
+                </label>
+                <label>
+                  Browser workers (1–3)
+                  <input
+                    type="number"
+                    min={1}
+                    max={3}
+                    value={bulkLoginWorkers}
+                    onChange={(event) => setBulkLoginWorkers(event.target.value)}
+                  />
+                </label>
+                <label className="checkRow">
+                  <input
+                    type="checkbox"
+                    checked={bulkLoginHeaded}
+                    onChange={(event) => setBulkLoginHeaded(event.target.checked)}
+                  />
+                  Show browser windows (recommended for CAPTCHA/extra verification)
+                </label>
+                <div className="stagingWarning">
+                  <strong>Staging only</strong>
+                  <small>
+                    Credentials are used transiently by the local worker, then erased. The app does
+                    not save passwords or 2FA. CAPTCHA, security checks, and provider consent remain
+                    manual; use only accounts you own.
+                  </small>
+                </div>
+              </div>
+            )}
+            {!isBulkImport && !isBulkLogin && (
               <label>
                 <span className="labelRow">
                   Custom command (required)

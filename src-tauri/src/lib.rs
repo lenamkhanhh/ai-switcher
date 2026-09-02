@@ -19,7 +19,8 @@ mod vault;
 use app_state::ManagedState;
 use models::{
     AddAccountInput, AddApiAccountInput, ApiUsageReport, AppSnapshot, BulkImportCodexAccountsInput,
-    CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
+    BulkLoginCodexInput, CreateApiGatewayKeyInput, CreateApiGatewayKeyResult,
+    CreateVirtualApiAccountInput,
     DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport, ImportCodexAccountInput,
     RenameAccountInput, SaveApiGatewayComboInput, SetApiGatewayAccountInput, SetLauncherInput,
     SetToolSetupInput, StartApiGatewayInput, SwitchAccountInput, ToolId, UsageReports,
@@ -140,6 +141,25 @@ async fn bulk_import_codex_accounts(
         worker_app
             .state::<ManagedState>()
             .import_codex_accounts_bulk(input)
+            .map_err(display_error)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    tray::rebuild(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn bulk_login_codex_staging(
+    app: tauri::AppHandle,
+    input: BulkLoginCodexInput,
+) -> Result<AppSnapshot, String> {
+    let resource_dir = app.path().resource_dir().ok();
+    let worker_app = app.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<ManagedState>()
+            .bulk_login_codex_staging(input, resource_dir)
             .map_err(display_error)
     })
     .await
@@ -559,6 +579,7 @@ pub fn run() {
             add_account,
             import_codex_account,
             bulk_import_codex_accounts,
+            bulk_login_codex_staging,
             add_api_account,
             fetch_gateway_models,
             rename_account,

@@ -363,6 +363,15 @@ export interface BulkImportCodexAccountsInput {
   launcherPrefix?: string;
 }
 
+export interface BulkLoginCodexInput {
+  /** One-time local text payload; never persisted by the app. */
+  credentialsText: string;
+  /** Optional path to the user's existing 9router auto_login.py worker. */
+  workerPath?: string;
+  workers: number;
+  headed: boolean;
+}
+
 export interface VaultStatus {
   configured: boolean;
   unlocked: boolean;

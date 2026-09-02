@@ -2694,6 +2694,10 @@ button.danger:hover:not(:disabled) {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.kindToggle.fiveWay {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .kindToggle button {
   background: transparent;
   border-color: transparent;
@@ -2802,6 +2806,28 @@ button.danger:hover:not(:disabled) {
   display: block;
   font-weight: 400;
   margin-top: 2px;
+}
+
+.stagingLoginPanel {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.stagingWarning {
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+}
+
+.stagingWarning strong {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.stagingWarning small {
+  color: var(--text-2);
 }
 
 /* ── Auto Session tab ─────────────────────────────────────────────── */

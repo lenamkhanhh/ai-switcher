@@ -2,12 +2,14 @@ use crate::codex_app_server::{
     classify_terminal_turn, recovery_error_message, terminal_error_fingerprint, AppServerConfig,
     CodexAppServerClient,
 };
+use crate::bulk_login::run_staging_bulk_login;
 use crate::codex_import::{codex_auth_json, parse_k12_export, parse_k12_export_batch};
 use crate::models::{
     Account, AccountState, AddAccountInput, AddApiAccountInput, ApiGatewayAccount, ApiGatewayCombo,
     ApiGatewayConfig, ApiGatewayKey, ApiGatewayServerState, ApiGatewaySnapshot, ApiProvider,
-    ApiUsageReport, AppSnapshot, AutoSwitchSetting, BulkImportCodexAccountsInput, CodexLoginMethod,
-    CreateApiGatewayKeyInput, CreateApiGatewayKeyResult, CreateVirtualApiAccountInput,
+    ApiUsageReport, AppSnapshot, AutoSwitchSetting, BulkImportCodexAccountsInput,
+    BulkLoginCodexInput, CodexLoginMethod, CreateApiGatewayKeyInput, CreateApiGatewayKeyResult,
+    CreateVirtualApiAccountInput,
     DeleteApiGatewayComboInput, DeleteApiGatewayKeyInput, DetectionReport, GoalSnapshot,
     ImportCodexAccountInput, QuotaInfo, RecoveryErrorKind, RecoveryPlanStep,
     RecoveryRuntimeSnapshot, RenameAccountInput, ResumeJob, ResumeJobStatus,
@@ -2907,6 +2909,22 @@ impl ManagedState {
         }
 
         self.snapshot()
+    }
+
+    /// Run the opt-in local login bridge, then feed its short-lived OAuth export through the
+    /// existing transactional bulk importer. The bridge process owns the browser interaction;
+    /// this method never stores raw email/password/2FA material in app state.
+    pub fn bulk_login_codex_staging(
+        &self,
+        input: BulkLoginCodexInput,
+        resource_dir: Option<std::path::PathBuf>,
+    ) -> Result<AppSnapshot> {
+        let oauth_export = run_staging_bulk_login(input, resource_dir.as_deref())?;
+        self.import_codex_accounts_bulk(BulkImportCodexAccountsInput {
+            session_json: oauth_export,
+            name_prefix: Some("acc".to_string()),
+            launcher_prefix: Some("bulk-".to_string()),
+        })
     }
 
     /// Save the Antigravity IDE account currently logged in: capture the token from the default
