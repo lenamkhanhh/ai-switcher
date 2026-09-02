@@ -370,6 +370,7 @@ export interface BulkLoginCodexInput {
   workerPath?: string;
   workers: number;
   headed: boolean;
+  acknowledged: boolean;
 }
 
 export interface VaultStatus {

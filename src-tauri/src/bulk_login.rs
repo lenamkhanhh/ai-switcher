@@ -80,6 +80,14 @@ pub(crate) fn validate_worker_limit(workers: u8) -> Result<()> {
     }
 }
 
+pub(crate) fn validate_staging_acknowledgement(acknowledged: bool) -> Result<()> {
+    if acknowledged {
+        Ok(())
+    } else {
+        bail!("Confirm that you own these accounts before starting staging login")
+    }
+}
+
 /// Build arguments for the bridge using paths only. Credential contents never become process
 /// arguments, which keeps them out of command-line inspection and crash reports.
 pub(crate) fn bridge_args(
@@ -118,8 +126,10 @@ pub(crate) fn run_staging_bulk_login(
         worker_path,
         workers,
         headed,
+        acknowledged,
     } = input;
     let credentials = zeroize::Zeroizing::new(credentials_text);
+    validate_staging_acknowledgement(acknowledged)?;
     validate_credentials_file(&credentials)?;
     validate_worker_limit(workers)?;
 
@@ -390,6 +400,12 @@ mod tests {
         assert!(validate_worker_limit(0).is_err());
         assert!(validate_worker_limit(4).is_err());
         assert!(validate_worker_limit(3).is_ok());
+    }
+
+    #[test]
+    fn requires_explicit_account_ownership_acknowledgement() {
+        assert!(validate_staging_acknowledgement(false).is_err());
+        assert!(validate_staging_acknowledgement(true).is_ok());
     }
 
     #[test]

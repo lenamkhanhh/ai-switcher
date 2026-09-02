@@ -246,6 +246,7 @@ test("K12 Codex import stays local and reduces the export to OAuth fields", asyn
   assert.match(app, /Bulk OAuth/);
   assert.match(app, /Auto login \(staging\)/);
   assert.match(app, /Credentials are used transiently/);
+  assert.match(app, /I own these accounts and authorize this local staging login/);
   assert.match(app, /Nothing is uploaded/);
   assert.match(tauri, /import_codex_account/);
   assert.match(tauri, /bulk_import_codex_accounts/);
@@ -263,6 +264,7 @@ test("staging bulk-login bridge keeps credential handling local and bounded", as
   assert.match(rust, /stdout\(Stdio::null\(\)\)/);
   assert.match(rust, /stderr\(Stdio::null\(\)\)/);
   assert.match(rust, /secure_remove/);
+  assert.match(rust, /validate_staging_acknowledgement/);
   assert.match(bridge, /providerConnections/);
   assert.match(bridge, /worker\.debug_page = lambda/);
   assert.match(bridge, /MAX_WORKERS = 3/);

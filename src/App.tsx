@@ -3167,6 +3167,7 @@ function AddDialog({
   const [bulkLoginWorkerPath, setBulkLoginWorkerPath] = useState("");
   const [bulkLoginWorkers, setBulkLoginWorkers] = useState("3");
   const [bulkLoginHeaded, setBulkLoginHeaded] = useState(true);
+  const [bulkLoginAcknowledged, setBulkLoginAcknowledged] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   // API-mode state.
@@ -3246,6 +3247,10 @@ function AddDialog({
         setMessage("Choose the email|password|2fa file first");
         return;
       }
+      if (!bulkLoginAcknowledged) {
+        setMessage("Confirm that you own these accounts before starting staging login");
+        return;
+      }
       if (bulkLoginFile.size > 5 * 1024 * 1024) {
         setMessage("Credential file is too large (maximum is 5 MB)");
         return;
@@ -3267,6 +3272,7 @@ function AddDialog({
         workerPath: bulkLoginWorkerPath.trim() || undefined,
         workers,
         headed: bulkLoginHeaded,
+        acknowledged: bulkLoginAcknowledged,
       });
       setBulkLoginFile(null);
       return;
@@ -3547,6 +3553,14 @@ function AddDialog({
                   />
                   Show browser windows (recommended for CAPTCHA/extra verification)
                 </label>
+                <label className="checkRow">
+                  <input
+                    type="checkbox"
+                    checked={bulkLoginAcknowledged}
+                    onChange={(event) => setBulkLoginAcknowledged(event.target.checked)}
+                  />
+                  I own these accounts and authorize this local staging login
+                </label>
                 <div className="stagingWarning">
                   <strong>Staging only</strong>
                   <small>
@@ -3679,6 +3693,8 @@ function AddDialog({
               ? "Create account"
               : isImport
                 ? "Import session"
+                : isBulkLogin
+                  ? "Run staging login"
                 : isCli
                   ? "Create & login"
                   : "Save this account"}

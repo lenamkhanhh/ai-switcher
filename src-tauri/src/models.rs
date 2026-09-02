@@ -974,6 +974,8 @@ pub struct BulkLoginCodexInput {
     pub workers: u8,
     #[serde(default = "default_true")]
     pub headed: bool,
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 fn default_bulk_login_workers() -> u8 {
