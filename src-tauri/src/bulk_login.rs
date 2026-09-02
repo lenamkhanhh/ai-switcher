@@ -28,7 +28,7 @@ pub(crate) fn validate_credentials_file(raw: &str) -> Result<usize> {
     let mut count = 0usize;
     for (line_index, line) in raw.lines().enumerate() {
         let line_number = line_index + 1;
-        let line = line.trim();
+        let line = line.trim().trim_start_matches('\u{feff}');
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -239,12 +239,24 @@ fn wait_for_worker(child: &mut Child) -> Result<ExitStatus> {
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            terminate_worker_tree(child);
             let _ = child.wait();
             bail!("Bulk login worker exceeded the 60-minute staging limit");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn terminate_worker_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("taskkill.exe");
+        crate::tools::hide_command_window(&mut command);
+        let _ = command
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .output();
+    }
+    let _ = child.kill();
 }
 
 fn resolve_python() -> Result<(PathBuf, Vec<String>)> {
@@ -289,6 +301,7 @@ fn resolve_bridge_script(resource_dir: Option<&Path>) -> Result<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(resource_dir) = resource_dir {
         candidates.push(resource_dir.join(BRIDGE_FILE));
+        candidates.push(resource_dir.join("resources").join(BRIDGE_FILE));
     }
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

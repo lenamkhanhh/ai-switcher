@@ -36,7 +36,7 @@ def read_accounts(path: Path):
     accounts = []
     seen = set()
     for line_number, line in enumerate(raw.splitlines(), start=1):
-        value = line.strip()
+        value = line.strip().lstrip("\ufeff")
         if not value or value.startswith("#"):
             continue
         parts = value.split("|")

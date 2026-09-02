@@ -265,6 +265,7 @@ test("staging bulk-login bridge keeps credential handling local and bounded", as
   assert.match(rust, /stderr\(Stdio::null\(\)\)/);
   assert.match(rust, /secure_remove/);
   assert.match(rust, /validate_staging_acknowledgement/);
+  assert.match(rust, /taskkill\.exe/);
   assert.match(bridge, /providerConnections/);
   assert.match(bridge, /worker\.debug_page = lambda/);
   assert.match(bridge, /MAX_WORKERS = 3/);
