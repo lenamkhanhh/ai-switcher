@@ -3215,7 +3215,7 @@ function AddDialog({
       setMessage("Account name is limited to 20 characters");
       return;
     }
-    if (isCli && launcher.trim() === "" && !isBulkImport) {
+    if (isCli && launcher.trim() === "" && !isBulkImport && !isBulkLogin) {
       setMessage(`A custom command is required (e.g. ${tool.id}-work)`);
       return;
     }
