@@ -273,6 +273,14 @@ test("staging bulk-login bridge keeps credential handling local and bounded", as
   assert.doesNotMatch(bridge, /print\(/);
 });
 
+test("bulk-login mode bypasses the single-account custom-command requirement", async () => {
+  const app = await read("src/App.tsx");
+  assert.match(
+    app,
+    /if \(isCli && launcher\.trim\(\) === "" && !isBulkImport && !isBulkLogin\)/,
+  );
+});
+
 test("Settings formats CLI paths for display without mutating stored setup paths", async () => {
   const app = await read("src/App.tsx");
   const formatter = await read("src/pathDisplay.ts");
